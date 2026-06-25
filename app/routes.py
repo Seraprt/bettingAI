@@ -94,11 +94,11 @@ def predict_all():
 
 @api.route('/best_bets', methods=['GET'])
 def best_bets():
-    min_confidence = float(request.args.get('min_confidence', 0.4))
+    min_confidence = float(request.args.get('min_confidence', 0.2))
     days_ahead = int(request.args.get('days_ahead', 14))
-    tournament = request.args.get('tournament', None)
+    tournament = request.args.get('tournament')
     min_prob = float(request.args.get('min_prob', 0.2))
-    max_prob = float(request.args.get('max_prob', 0.95))
+    max_prob = float(request.args.get('max_prob', 1))
     limit = int(request.args.get('limit', 50))
 
     now = datetime.utcnow()
@@ -162,9 +162,9 @@ def best_bets():
 
 @api.route('/sure_bets', methods=['GET'])
 def sure_bets():
-    min_prob = float(request.args.get('min_prob', 0.8))
-    min_confidence = float(request.args.get('min_confidence', 0.7))
-    days_ahead = int(request.args.get('days_ahead', 7))
+    min_prob = float(request.args.get('min_prob', 0.6))
+    min_confidence = float(request.args.get('min_confidence', 0.5))
+    days_ahead = int(request.args.get('days_ahead', 3))
 
     now = datetime.utcnow()
     future = now + timedelta(days=days_ahead)
