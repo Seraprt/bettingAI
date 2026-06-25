@@ -260,3 +260,6 @@ def force_predict_all():
             except Exception as e:
                 logging.error(f"Failed to predict {m['_id']}: {e}")
     return jsonify({'message': f'Predictions computed for {count} matches out of {len(matches)} total.'}), 200
+@api.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'alive', 'timestamp': datetime.utcnow().isoformat()}), 200
