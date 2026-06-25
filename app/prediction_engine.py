@@ -27,7 +27,6 @@ WEIGHTS = {
 # 1. Match context analysis
 # ------------------------------------------------------------------
 def get_match_context(match_doc):
-    """Return context flags: derby, knockout, final, group, host_advantage, etc."""
     context = {
         'is_derby': False,
         'is_knockout': False,
@@ -35,15 +34,13 @@ def get_match_context(match_doc):
         'is_group': False,
         'host_advantage': False,
         'is_world_cup': False,
-        'motivation': 1.0  # multiplier
+        'motivation': 1.0
     }
     tournament = match_doc.get('tournament', '').lower()
     stage = match_doc.get('stage', '').lower()
 
     if 'world cup' in tournament:
         context['is_world_cup'] = True
-        # For World Cup, home advantage is only for host (we don't know host, so ignore)
-        # But we can set home_away factor to neutral if not host (we'll handle in factors)
     if 'final' in stage:
         context['is_final'] = True
         context['motivation'] = 1.2
@@ -54,14 +51,9 @@ def get_match_context(match_doc):
         context['is_group'] = True
         context['motivation'] = 1.0
     else:
-        # Domestic cup early rounds might have lower motivation
         if 'cup' in tournament and 'round' in stage:
             context['motivation'] = 0.9
 
-    # Derby detection: simple heuristic – if teams are from same city or have high H2H intensity
-    # We'll use H2H factor: if h2h > 0.7 and both teams are from same country (approx), consider derby
-    # For now, we rely on the user's request: we'll mark as derby if the match is known (we can add a list later)
-    # For demonstration, we'll use a placeholder: if tournament is domestic and h2h factor > 0.7
     h2h = match_doc.get('home_factors', {}).get('h2h', 0.5) if match_doc.get('home_factors') else 0.5
     if 'derby' in tournament or 'clasico' in tournament or 'rival' in tournament:
         context['is_derby'] = True
@@ -81,25 +73,16 @@ def compute_match_factors(match_doc):
     if not home or not away:
         return None, None, 1.0, None, None
 
-    # Get weather
     weather = get_weather(home.get('latitude', 0), home.get('longitude', 0), match_doc['date'])
     weather_mult = get_weather_score(home.get('latitude', 0), home.get('longitude', 0), match_doc['date'])
     match_doc['weather_temp'] = weather['temp']
     match_doc['weather_condition'] = weather['condition']
 
-    # Tournament context
     context = get_match_context(match_doc)
-    # Adjust home/away factor for World Cup (neutral) or finals
-    if context['is_world_cup']:
-        # For World Cup, home advantage is only for host; we don't have host info, so set to neutral
-        # We'll adjust home_away_score later
-        pass
-
     agg_diff = None
     if match_doc.get('leg') == 2 and match_doc.get('aggregate_home') is not None:
         agg_diff = match_doc['aggregate_home'] - match_doc['aggregate_away']
 
-    # Home factors
     home_factors = {
         'form': get_form_score(home_id, match_doc['date']),
         'strength': get_strength_score(home_id),
@@ -127,13 +110,10 @@ def compute_match_factors(match_doc):
         'news': get_news_score(away_id)
     }
 
-    # For World Cup, reduce home advantage
     if context['is_world_cup']:
-        # Make home_away factor neutral (0.5) for both
         home_factors['home_away'] = 0.5
         away_factors['home_away'] = 0.5
 
-    # Convert to xG
     base_home = 1.2
     base_away = 1.0
     home_xg = base_home * (0.5 + 0.5 * home_factors['strength']/100) * (1 + 0.1 * home_factors['form']) + 0.3 * (home_factors['home_away'] - 0.5)
@@ -156,7 +136,6 @@ def predict(match_doc):
         if not home_factors:
             return
 
-        # Weighted score difference
         score_diff = 0.0
         for key in WEIGHTS:
             if key == 'weather':
@@ -180,7 +159,6 @@ def predict(match_doc):
         draw /= total
         away_win /= total
 
-        # Confidence
         contributions = []
         for key in WEIGHTS:
             if key == 'weather':
@@ -193,7 +171,6 @@ def predict(match_doc):
         confidence = 0.5 * agreement + 0.5 * extremity
         confidence = min(1, confidence)
 
-        # Store
         db.matches.update_one(
             {'_id': match_doc['_id']},
             {'$set': {
@@ -247,6 +224,9 @@ def poisson_handicap_prob(h_xg, a_xg, handicap):
                 prob += poisson.pmf(h, h_xg) * poisson.pmf(a, a_xg)
     return prob
 
+# ------------------------------------------------------------------
+# 5. Compute all market probabilities (filtered for common markets)
+# ------------------------------------------------------------------
 def compute_all_market_probs(h_xg, a_xg):
     probs = {}
 
@@ -263,8 +243,8 @@ def compute_all_market_probs(h_xg, a_xg):
     probs['X2'] = draw + away_win
     probs['12'] = home_win + away_win
 
-    # Over/Under
-    for threshold in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]:
+    # Over/Under (only 0.5, 1.5, 2.5, 3.5, 4.5 – common thresholds)
+    for threshold in [0.5, 1.5, 2.5, 3.5, 4.5]:
         over = 1 - poisson_cdf_total(threshold, h_xg, a_xg)
         probs[f'over_{threshold}'] = over
         probs[f'under_{threshold}'] = 1 - over
@@ -275,53 +255,28 @@ def compute_all_market_probs(h_xg, a_xg):
     probs['btts_yes'] = p_home_scores * p_away_scores
     probs['btts_no'] = 1 - probs['btts_yes']
 
-    # Team Totals
+    # Team Totals (0.5, 1.5, 2.5)
     for thresh in [0.5, 1.5, 2.5]:
         probs[f'home_over_{thresh}'] = 1 - poisson.cdf(thresh, h_xg)
         probs[f'home_under_{thresh}'] = poisson.cdf(thresh, h_xg)
         probs[f'away_over_{thresh}'] = 1 - poisson.cdf(thresh, a_xg)
         probs[f'away_under_{thresh}'] = poisson.cdf(thresh, a_xg)
 
-    # Team to score 3+ goals
+    # Team to score 3+ (away + any)
     probs['home_over_2.5_goals'] = 1 - poisson.cdf(2, h_xg)
     probs['away_over_2.5_goals'] = 1 - poisson.cdf(2, a_xg)
     p_home_less3 = poisson.cdf(2, h_xg)
     p_away_less3 = poisson.cdf(2, a_xg)
     probs['any_team_over_2.5_goals'] = 1 - (p_home_less3 * p_away_less3)
 
-    # Exact total goals
-    for exact in [2, 3, 4]:
-        prob_exact = 0.0
-        for h in range(0, 11):
-            a = exact - h
-            if 0 <= a <= 10:
-                prob_exact += poisson.pmf(h, h_xg) * poisson.pmf(a, a_xg)
-        probs[f'exact_{exact}_goals'] = prob_exact
-
-    # Home win to nil, Away win to nil
-    prob_home_win_to_nil = 0.0
-    prob_away_win_to_nil = 0.0
-    for h in range(1, 11):
-        prob_home_win_to_nil += poisson.pmf(h, h_xg) * poisson.pmf(0, a_xg)
-    for a in range(1, 11):
-        prob_away_win_to_nil += poisson.pmf(0, h_xg) * poisson.pmf(a, a_xg)
-    probs['home_win_to_nil'] = prob_home_win_to_nil
-    probs['away_win_to_nil'] = prob_away_win_to_nil
-
-    # Handicaps
-    handicaps = [-2.5, -2, -1.5, -1, -0.5, 0.5, 1, 1.5, 2, 2.5]
-    for hcap in handicaps:
+    # Handicaps (only -1, -1.5, -2, +1, +1.5, +2 – common)
+    for hcap in [-2, -1.5, -1, 1, 1.5, 2]:
         if hcap < 0:
-            key = f'home_{hcap}'
-            probs[key] = poisson_handicap_prob(h_xg, a_xg, hcap)
-            away_key = f'away_+{abs(hcap)}'
-            probs[away_key] = 1 - probs[key]
+            probs[f'home_{hcap}'] = poisson_handicap_prob(h_xg, a_xg, hcap)
+            probs[f'away_+{abs(hcap)}'] = 1 - probs[f'home_{hcap}']
         else:
-            # away -hcap is covered by the negative loop
-            pass
-    # Add home +0.5, away -0.5 for completeness
-    probs['home_+0.5'] = 1 - away_win  # home not lose
-    probs['away_-0.5'] = away_win
+            probs[f'away_-{hcap}'] = poisson_handicap_prob(h_xg, a_xg, -hcap)
+            probs[f'home_+{hcap}'] = 1 - probs[f'away_-{hcap}']
 
     # Odd/Even (simulation)
     np.random.seed(42)
@@ -336,7 +291,7 @@ def compute_all_market_probs(h_xg, a_xg):
     probs['odd'] = odd_count / 10000
     probs['even'] = even_count / 10000
 
-    # Correct Scores (top 10)
+    # Correct Scores (top 5 most likely – some platforms offer them)
     score_probs = {}
     for h in range(0, 5):
         for a in range(0, 5):
@@ -344,14 +299,14 @@ def compute_all_market_probs(h_xg, a_xg):
                 continue
             key = f'{h}-{a}'
             score_probs[key] = poisson.pmf(h, h_xg) * poisson.pmf(a, a_xg)
-    sorted_scores = sorted(score_probs.items(), key=lambda x: x[1], reverse=True)[:10]
+    sorted_scores = sorted(score_probs.items(), key=lambda x: x[1], reverse=True)[:5]
     for key, prob in sorted_scores:
         probs[f'correct_{key}'] = prob
 
     return probs
 
 # ------------------------------------------------------------------
-# 5. Detailed reason generation
+# 6. Detailed reason generation (kept as before)
 # ------------------------------------------------------------------
 def generate_detailed_reason(match_doc, market, probability, confidence):
     home_factors = match_doc.get('home_factors', {})
@@ -364,7 +319,7 @@ def generate_detailed_reason(match_doc, market, probability, confidence):
 
     reason_parts = []
 
-    # 1. Tournament context
+    # Tournament context
     if context.get('is_final'):
         reason_parts.append("🏆 This is a FINAL – high motivation and intensity expected.")
     elif context.get('is_knockout'):
@@ -374,7 +329,7 @@ def generate_detailed_reason(match_doc, market, probability, confidence):
     if context.get('is_derby'):
         reason_parts.append("⚔️ This is a DERBY – form and statistics can be overridden by rivalry and emotion.")
 
-    # 2. Team strength and form
+    # Team strength and form
     home_strength = home_factors.get('strength', 50)
     away_strength = away_factors.get('strength', 50)
     home_form = home_factors.get('form', 0.5)
@@ -394,7 +349,7 @@ def generate_detailed_reason(match_doc, market, probability, confidence):
     else:
         reason_parts.append(f"📊 Form is similar ({home_form:.2f} vs {away_form:.2f})")
 
-    # 3. Home/Away advantage
+    # Home/Away advantage
     home_adv = home_factors.get('home_away', 0.5)
     away_adv = away_factors.get('home_away', 0.5)
     if home_adv > 0.65:
@@ -402,7 +357,7 @@ def generate_detailed_reason(match_doc, market, probability, confidence):
     elif away_adv < 0.35:
         reason_parts.append(f"✈️ {away['name']} struggles away from home ({away_adv:.2f})")
 
-    # 4. Fatigue
+    # Fatigue
     home_fatigue = home_factors.get('fatigue', 1.0)
     away_fatigue = away_factors.get('fatigue', 1.0)
     if home_fatigue < 0.8:
@@ -410,7 +365,7 @@ def generate_detailed_reason(match_doc, market, probability, confidence):
     if away_fatigue < 0.8:
         reason_parts.append(f"😓 {away['name']} may be fatigued (recent match/travel)")
 
-    # 5. News
+    # News
     home_news = home_factors.get('news', 0.5)
     away_news = away_factors.get('news', 0.5)
     if home_news > 0.6:
@@ -422,14 +377,14 @@ def generate_detailed_reason(match_doc, market, probability, confidence):
     elif away_news < 0.4:
         reason_parts.append(f"📰 Negative news for {away['name']}")
 
-    # 6. Head-to-head
+    # Head-to-head
     h2h = home_factors.get('h2h', 0.5)
     if h2h > 0.7:
         reason_parts.append(f"📊 Historical advantage for {home['name']} in head-to-head")
     elif h2h < 0.3:
         reason_parts.append(f"📊 Historical advantage for {away['name']} in head-to-head")
 
-    # 7. Expected goals (xG)
+    # xG
     total_xg = h_xg + a_xg
     if 'over' in market or 'under' in market:
         reason_parts.append(f"⚽ Total expected goals = {total_xg:.2f} (home {h_xg:.2f}, away {a_xg:.2f})")
@@ -440,19 +395,16 @@ def generate_detailed_reason(match_doc, market, probability, confidence):
     elif 'away_win_to_nil' in market:
         reason_parts.append(f"🧤 {away['name']} likely to keep a clean sheet (home xG {h_xg:.2f})")
 
-    # 8. Confidence and probability
     if confidence > 0.8:
         reason_parts.append(f"✅ High confidence ({confidence:.0%}) in this selection")
     elif confidence > 0.6:
         reason_parts.append(f"📊 Moderate confidence ({confidence:.0%})")
 
-    # 9. Negative factors (if any)
     if home_fatigue < 0.7 or away_fatigue < 0.7:
         reason_parts.append("⚠️ Fatigue could affect performance")
     if home_news < 0.4 or away_news < 0.4:
         reason_parts.append("⚠️ Negative team news may impact result")
 
-    # 10. Market-specific final note
     if 'under' in market:
         reason_parts.append(f"🔒 Under {market.split('_')[1]} goals is supported by low expected total ({total_xg:.2f})")
     elif 'over' in market:
@@ -467,7 +419,7 @@ def generate_detailed_reason(match_doc, market, probability, confidence):
     return " | ".join(reason_parts)
 
 # ------------------------------------------------------------------
-# 6. Get best market for a match (for Best Bets)
+# 7. Get best market for a match (for Best Bets)
 # ------------------------------------------------------------------
 def get_best_market(match_doc):
     if match_doc.get('home_xg') is None:
@@ -481,9 +433,10 @@ def get_best_market(match_doc):
 
     probs = compute_all_market_probs(h_xg, a_xg)
 
-    # Exclude trivial markets
-    excluded = ['under_6.5', 'under_7.5', 'under_5.5', 'under_4.5', 'over_0.5']
-    # For derby or knockout, we might want to avoid certain markets, but we keep all.
+    # Remove markets that are rarely offered
+    # We keep: 1X2, Double Chance, Over/Under 0.5-4.5, BTTS, Team Totals, Handicaps, Odd/Even, Top 5 correct scores
+    # Exclude: Over 5.5, 6.5, 7.5, Under 0.5 (trivial), etc.
+    excluded = ['under_0.5', 'over_5.5', 'under_5.5', 'over_6.5', 'under_6.5', 'over_7.5', 'under_7.5']
 
     best_market = None
     best_score = 0
@@ -494,17 +447,17 @@ def get_best_market(match_doc):
             continue
         if market in excluded:
             continue
-        # For derby, we might want to avoid straight win markets if probability < 0.5
+        # For derby, avoid straight win if probability < 0.5
         if context.get('is_derby') and market in ['home_win', 'away_win'] and prob < 0.5:
             continue
-        # For finals, increase weight on 1X2 and BTTS
+        # For finals, give extra weight to 1X2 and BTTS
         score = prob * confidence
         if score > best_score:
             best_score = score
             best_market = market
             best_prob = prob
 
-    # Fallback: if none, pick highest probability
+    # Fallback: if none found, pick the highest probability among remaining
     if best_market is None:
         for market, prob in probs.items():
             if market.startswith('correct_'):
@@ -528,7 +481,7 @@ def get_best_market(match_doc):
     return None
 
 # ------------------------------------------------------------------
-# 7. Kelly staking
+# 8. Kelly staking
 # ------------------------------------------------------------------
 def kelly_fraction(prob, odds):
     if odds <= 1:
@@ -541,7 +494,7 @@ def kelly_fraction(prob, odds):
     return max(0, min(1, kelly))
 
 # ------------------------------------------------------------------
-# 8. Get safe markets (for Prediction Detail)
+# 9. Get safe markets (for Prediction Detail)
 # ------------------------------------------------------------------
 def get_safe_markets(match_doc):
     if match_doc.get('home_xg') is None:
@@ -560,13 +513,9 @@ def get_safe_markets(match_doc):
     return safe
 
 # ------------------------------------------------------------------
-# 9. Sure bets: analyse all matches and return the most predictable
+# 10. Sure bets: analyse all matches and return the most predictable
 # ------------------------------------------------------------------
 def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7):
-    """
-    For a list of matches, find markets with probability >= min_prob and confidence >= min_confidence.
-    Return list with detailed reasons.
-    """
     sure_list = []
     for match in matches:
         if match.get('home_win_prob') is None:
@@ -584,17 +533,19 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7):
         home = db.teams.find_one({'_id': match['home_team_id']})
         away = db.teams.find_one({'_id': match['away_team_id']})
 
-        # For each market, check if probability >= min_prob and we are not in derby with straight win
+        # Exclude obscure markets
+        excluded = ['under_0.5', 'over_5.5', 'under_5.5', 'over_6.5', 'under_6.5', 'over_7.5', 'under_7.5']
+
         for market, prob in probs.items():
             if market.startswith('correct_'):
                 continue
+            if market in excluded:
+                continue
             if prob < min_prob:
                 continue
-            # Derby: avoid straight win if not strong evidence
+            # Derby: avoid straight win if not strong
             if context.get('is_derby') and market in ['home_win', 'away_win'] and prob < 0.65:
                 continue
-            # Finals: give more weight to BTTS or 1X2
-            # Already handled by probability threshold
 
             reason = generate_detailed_reason(match, market, prob, confidence)
             sure_list.append({
@@ -606,14 +557,15 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7):
                 'score': prob * confidence,
                 'reason': reason,
                 'match_id': str(match['_id']),
-                'time_remaining': get_time_remaining(match['date'])  # we'll need to import this
+                'time_remaining': get_time_remaining(match['date'])
             })
 
-    # Sort by score descending
     sure_list.sort(key=lambda x: x['score'], reverse=True)
-    return sure_list[:20]  # return top 20
+    return sure_list[:20]
 
-# We need to import get_time_remaining from routes or utils, but we'll define it here for completeness.
+# ------------------------------------------------------------------
+# 11. Time remaining helper (copy from routes)
+# ------------------------------------------------------------------
 def get_time_remaining(match_date):
     from datetime import datetime
     now = datetime.utcnow()
