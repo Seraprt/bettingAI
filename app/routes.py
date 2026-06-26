@@ -263,3 +263,9 @@ def force_predict_all():
 @api.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'alive', 'timestamp': datetime.utcnow().isoformat()}), 200
+
+@api.route('/ingest', methods=['POST'])
+def ingest():
+    from .data_ingestion import fetch_all_football
+    fetch_all_football()
+    return jsonify({'message': 'Ingestion triggered.'}), 200

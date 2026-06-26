@@ -8,26 +8,23 @@ from .config import Config
 from .db import db
 from .routes import api
 from .scheduler import start_scheduler
+from .prediction_engine import predict
+import logging
 
-# Keep-alive function
+# Keep-alive function (unchanged)
 def keep_alive():
-    """Ping the server periodically to prevent Render from sleeping."""
-    # Use the external hostname provided by Render, or fallback to a default
-    host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'xlgames.onrender.com')
+    host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'bettingai-ml4c.onrender.com')
     url = f"https://{host}/api/health"
-    
     while True:
         try:
             response = requests.get(url, timeout=10)
             if response.status_code == 200:
-                print(f"✅ Keep-alive ping sent to {url} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"✅ Keep-alive ping sent to {url}")
             else:
-                print(f"⚠️ Keep-alive ping failed with status {response.status_code}")
+                logging.warning(f"⚠️ Keep-alive ping failed with status {response.status_code}")
         except Exception as e:
-            print(f"❌ Keep-alive ping error: {e}")
-        
-        # Sleep for 4 minutes (Render sleeps after 15 minutes of inactivity)
-        time.sleep(4 * 60)  # 240 seconds
+            logging.error(f"❌ Keep-alive ping error: {e}")
+        time.sleep(4 * 60)
 
 def create_app():
     app = Flask(__name__)
@@ -45,13 +42,25 @@ def create_app():
         db.matches.create_index([('date', 1)])
         db.matches.create_index([('home_team_id', 1), ('away_team_id', 1)])
 
+        # --- Run prediction on startup (force_predict_all) ---
+        logging.info("🚀 Running startup prediction for all matches...")
+        matches = list(db.matches.find())
+        count = 0
+        for m in matches:
+            if m.get('home_win_prob') is None:
+                try:
+                    predict(m)
+                    count += 1
+                except Exception as e:
+                    logging.error(f"Failed to predict {m['_id']}: {e}")
+        logging.info(f"✅ Startup prediction: computed for {count} matches.")
+
         # Start scheduler (only if not debug)
         if not app.debug:
             start_scheduler()
-
-            # Start keep-alive thread (only in production)
+            # Start keep-alive thread
             keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
             keep_alive_thread.start()
-            print("✅ Keep-alive thread started (pings every 4 minutes)")
+            logging.info("✅ Keep-alive thread started (pings every 4 minutes)")
 
     return app
