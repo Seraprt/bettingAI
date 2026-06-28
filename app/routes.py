@@ -9,6 +9,7 @@ from .prediction_engine import (
 )
 
 api = Blueprint('api', __name__)
+
 @api.route('/today_matches', methods=['GET'])
 def today_matches():
     now = datetime.utcnow()
@@ -174,6 +175,29 @@ def sure_bets():
         return jsonify({'message': 'No upcoming matches found.'}), 200
 
     sure_list = get_sure_bets(matches, min_prob, min_confidence)
+
+    # ---- STORE FOR LEARNING ----
+    for bet in sure_list:
+        # Find the match to get its date
+        match = db.matches.find_one({'_id': ObjectId(bet['match_id'])})
+        if match:
+            db.predictions.update_one(
+                {'match_id': bet['match_id'], 'market': bet['market']},
+                {'$set': {
+                    'match_id': bet['match_id'],
+                    'market': bet['market'],
+                    'probability': bet['probability'],
+                    'confidence': bet['confidence'],
+                    'predicted_at': datetime.utcnow(),
+                    'match_date': match['date'],
+                    'actual_outcome': None,  # will be filled later
+                    'home_team': match['home_team_id'],
+                    'away_team': match['away_team_id'],
+                    'tournament': match.get('tournament')
+                }},
+                upsert=True
+            )
+
     return jsonify(sure_list)
 
 @api.route('/available_markets', methods=['GET'])
@@ -260,6 +284,7 @@ def force_predict_all():
             except Exception as e:
                 logging.error(f"Failed to predict {m['_id']}: {e}")
     return jsonify({'message': f'Predictions computed for {count} matches out of {len(matches)} total.'}), 200
+
 @api.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'alive', 'timestamp': datetime.utcnow().isoformat()}), 200
@@ -269,3 +294,25 @@ def ingest():
     from .data_ingestion import fetch_all_football
     fetch_all_football()
     return jsonify({'message': 'Ingestion triggered.'}), 200
+
+# ---- NEW: Prediction accuracy endpoint ----
+@api.route('/prediction_accuracy', methods=['GET'])
+def prediction_accuracy():
+    """Return accuracy stats for stored predictions that have been resolved."""
+    # Find predictions that have actual_outcome set
+    predictions = list(db.predictions.find({'actual_outcome': {'$ne': None}}))
+    total = len(predictions)
+    if total == 0:
+        return jsonify({'message': 'No resolved predictions yet.'}), 200
+
+    correct = sum(1 for p in predictions if p.get('actual_outcome') == 'won')
+    lost = sum(1 for p in predictions if p.get('actual_outcome') == 'lost')
+    pending = sum(1 for p in predictions if p.get('actual_outcome') is None)
+
+    return jsonify({
+        'total_resolved': total,
+        'correct': correct,
+        'lost': lost,
+        'accuracy': round(correct / total * 100, 2) if total > 0 else 0,
+        'pending': pending
+    })

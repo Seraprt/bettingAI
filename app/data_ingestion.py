@@ -20,8 +20,40 @@ COMPETITION_TO_SPORT_KEY = {
     'EC': 'soccer_uefa_euro',
 }
 
+# ------------------------------------------------------------
+# ELO UPDATE FUNCTION
+# ------------------------------------------------------------
+def update_elo(home_team_id, away_team_id, home_goals, away_goals):
+    """Update Elo ratings for both teams based on match result."""
+    home = db.teams.find_one({'_id': home_team_id})
+    away = db.teams.find_one({'_id': away_team_id})
+    if not home or not away or home_goals is None or away_goals is None:
+        return
+
+    K = 30
+    home_elo = home.get('elo_rating', 1500)
+    away_elo = away.get('elo_rating', 1500)
+
+    expected_home = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
+    expected_away = 1 - expected_home
+
+    if home_goals > away_goals:
+        home_result, away_result = 1, 0
+    elif home_goals < away_goals:
+        home_result, away_result = 0, 1
+    else:
+        home_result, away_result = 0.5, 0.5
+
+    new_home_elo = home_elo + K * (home_result - expected_home)
+    new_away_elo = away_elo + K * (away_result - expected_away)
+
+    db.teams.update_one({'_id': home_team_id}, {'$set': {'elo_rating': new_home_elo}})
+    db.teams.update_one({'_id': away_team_id}, {'$set': {'elo_rating': new_away_elo}})
+
+# ------------------------------------------------------------
+# FETCH AND STORE MATCHES
+# ------------------------------------------------------------
 def fetch_matches_in_range(headers, date_from, date_to):
-    """Fetch matches for a single date range (max 10 days)."""
     url = 'https://api.football-data.org/v4/matches'
     params = {'dateFrom': date_from, 'dateTo': date_to}
     try:
@@ -40,7 +72,6 @@ def fetch_matches_in_range(headers, date_from, date_to):
         return []
 
 def store_matches(matches):
-    """Store a list of matches in the database."""
     for match in matches:
         home_name = match['homeTeam']['name']
         away_name = match['awayTeam']['name']
@@ -52,29 +83,48 @@ def store_matches(matches):
         home_goals = match['score']['fullTime']['home'] if status == 'FINISHED' else None
         away_goals = match['score']['fullTime']['away'] if status == 'FINISHED' else None
 
-        # Create/update teams (same as before)
+        # Ensure team names are not empty
+        if not home_name or not away_name:
+            print(f"Skipping match with empty team names: {home_name} vs {away_name}")
+            continue
+
+        # Create/update home team
         home = db.teams.find_one({'name': home_name, 'sport': 'football'})
         if not home:
             home_id = db.teams.insert_one({
-                'name': home_name, 'sport': 'football', 'strength': 50,
-                'elo_rating': 1500, 'home_ppg': 1.5, 'away_ppg': 1.0,
-                'coach_win_rate': 0.5, 'matches_coached': 0,
-                'latitude': None, 'longitude': None
+                'name': home_name,
+                'sport': 'football',
+                'strength': 50,
+                'elo_rating': 1500,
+                'home_ppg': 1.5,
+                'away_ppg': 1.0,
+                'coach_win_rate': 0.5,
+                'matches_coached': 0,
+                'latitude': None,
+                'longitude': None
             }).inserted_id
         else:
             home_id = home['_id']
 
+        # Create/update away team
         away = db.teams.find_one({'name': away_name, 'sport': 'football'})
         if not away:
             away_id = db.teams.insert_one({
-                'name': away_name, 'sport': 'football', 'strength': 50,
-                'elo_rating': 1500, 'home_ppg': 1.5, 'away_ppg': 1.0,
-                'coach_win_rate': 0.5, 'matches_coached': 0,
-                'latitude': None, 'longitude': None
+                'name': away_name,
+                'sport': 'football',
+                'strength': 50,
+                'elo_rating': 1500,
+                'home_ppg': 1.5,
+                'away_ppg': 1.0,
+                'coach_win_rate': 0.5,
+                'matches_coached': 0,
+                'latitude': None,
+                'longitude': None
             }).inserted_id
         else:
             away_id = away['_id']
 
+        # Upsert match
         db.matches.update_one(
             {'event_id': event_id},
             {'$set': {
@@ -92,12 +142,14 @@ def store_matches(matches):
             upsert=True
         )
 
+        # ---- UPDATE ELO IF MATCH IS FINISHED ----
+        if home_goals is not None and away_goals is not None:
+            update_elo(home_id, away_id, home_goals, away_goals)
+
 def fetch_football_matches():
-    """Fetch matches from Football-Data.org using multiple 10-day windows."""
     headers = {'X-Auth-Token': Config.FOOTBALL_API_KEY}
     now = datetime.now()
 
-    # 1. Fetch past 60 days in 10-day chunks
     past_days = 60
     chunk_size = 10
     for i in range(0, past_days, chunk_size):
@@ -110,9 +162,8 @@ def fetch_football_matches():
         if matches:
             store_matches(matches)
             print(f"  Stored {len(matches)} matches")
-        time.sleep(0.5)  # avoid rate limit
+        time.sleep(0.5)
 
-    # 2. Fetch future 14 days (in 7-day chunks to stay safe)
     future_days = 14
     for i in range(0, future_days, 7):
         start = now + timedelta(days=i)
@@ -128,5 +179,4 @@ def fetch_football_matches():
 
     print("Football matches ingestion completed.")
 
-# Alias for compatibility
 fetch_all_football = fetch_football_matches
