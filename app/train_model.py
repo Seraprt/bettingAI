@@ -128,6 +128,11 @@ def train():
     joblib.dump(model_away, 'app/models/xg_away.pkl')
     logging.info("💾 Models saved to app/models/")
     logging.info("🎉 Training complete!")
-
+def run_training():
+    """Wrapper function to be called from outside (threads, endpoints)."""
+    try:
+        train()
+    except Exception as e:
+        logging.error(f"Training failed: {e}")
 if __name__ == '__main__':
     train()
