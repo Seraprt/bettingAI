@@ -125,8 +125,7 @@ def train():
     os.makedirs('app/models', exist_ok=True)
     joblib.dump(model_home, 'app/models/xg_home.pkl')
     joblib.dump(model_away, 'app/models/xg_away.pkl')
-    logging.info("💾 Models saved to app/models/")
-    logging.info("🎉 Training complete!")
+    logging.info(f"✅ Models saved to {os.path.abspath('app/models/')}")
 def run_training():
     """Wrapper function to be called from outside (threads, endpoints)."""
     try:
