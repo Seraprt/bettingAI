@@ -72,7 +72,6 @@ def train():
     logging.info("🚀 Starting training on ALL finished matches...")
     logging.info("📊 Loading finished matches (no limit)...")
     
-    # Use a cursor with batch_size to avoid timeout issues
     cursor = db.matches.find(
         {'home_goals': {'$ne': None}, 'away_goals': {'$ne': None}}
     ).sort('date', -1)
@@ -103,7 +102,7 @@ def train():
     model_home.fit(X_train, y_home_train, verbose=True)
     home_pred = model_home.predict(X_test)
     home_mae = mean_absolute_error(y_home_test, home_pred)
-    home_rmse = mean_squared_error(y_home_test, home_pred, squared=False)
+    home_rmse = np.sqrt(mean_squared_error(y_home_test, home_pred))   # <-- fixed
     home_r2 = r2_score(y_home_test, home_pred)
     logging.info(f"✅ Home goals: MAE={home_mae:.3f}, RMSE={home_rmse:.3f}, R²={home_r2:.3f}")
 
@@ -119,7 +118,7 @@ def train():
     model_away.fit(X_train, y_away_train, verbose=True)
     away_pred = model_away.predict(X_test)
     away_mae = mean_absolute_error(y_away_test, away_pred)
-    away_rmse = mean_squared_error(y_away_test, away_pred, squared=False)
+    away_rmse = np.sqrt(mean_squared_error(y_away_test, away_pred))   # <-- fixed
     away_r2 = r2_score(y_away_test, away_pred)
     logging.info(f"✅ Away goals: MAE={away_mae:.3f}, RMSE={away_rmse:.3f}, R²={away_r2:.3f}")
 
@@ -128,11 +127,6 @@ def train():
     joblib.dump(model_away, 'app/models/xg_away.pkl')
     logging.info("💾 Models saved to app/models/")
     logging.info("🎉 Training complete!")
-def run_training():
-    """Wrapper function to be called from outside (threads, endpoints)."""
-    try:
-        train()
-    except Exception as e:
-        logging.error(f"Training failed: {e}")
+
 if __name__ == '__main__':
     train()
