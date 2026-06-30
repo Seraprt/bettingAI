@@ -150,7 +150,7 @@ def fetch_football_matches():
     headers = {'X-Auth-Token': Config.FOOTBALL_API_KEY}
     now = datetime.now()
 
-    past_days = 60
+    past_days = 120
     chunk_size = 10
     for i in range(0, past_days, chunk_size):
         start = now - timedelta(days=past_days - i)

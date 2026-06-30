@@ -161,6 +161,18 @@ def best_bets():
         'available_markets': sorted(list(all_markets))
     })
 
+
+@api.route('/train', methods=['POST'])
+def trigger_training():
+    from .train_model import run_training
+    try:
+        run_training()
+        return jsonify({'message': 'Training completed successfully.'}), 200
+    except Exception as e:
+        logging.error(f"Training failed: {e}")
+        return jsonify({'error': str(e)}), 500
+    
+    
 @api.route('/sure_bets', methods=['GET'])
 def sure_bets():
     min_prob = float(request.args.get('min_prob', 0.6))

@@ -2,6 +2,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .data_ingestion import fetch_all_football
 from .prediction_engine import predict
 from .db import db
+from .train_model import run_training
 import logging
 
 def ingest_and_predict():
@@ -28,11 +29,13 @@ def ingest_and_predict():
             except Exception as e:
                 logging.error(f"Failed to predict {m['_id']}: {e}")
     logging.info(f"✅ Predictions computed for {count} matches.")
+def run_training_job():
+    logging.info("🔄 Running weekly training job...")
+    run_training()
 
 def start_scheduler():
-    """Start the background scheduler for daily ingestion and prediction."""
     scheduler = BackgroundScheduler()
-    # Schedule at midnight UTC every day
     scheduler.add_job(ingest_and_predict, 'cron', hour=0, minute=0)
+    scheduler.add_job(run_training_job, 'cron', day_of_week='sun', hour=3, minute=0)  # weekly
     scheduler.start()
-    logging.info("🚀 Scheduler started. Daily ingestion and prediction at 00:00 UTC.")
+    logging.info("🚀 Scheduler started. Daily ingestion at 00:00 UTC, weekly training on Sunday 03:00 UTC.")
