@@ -10,4 +10,7 @@ class Config:
     NEWS_API_KEY = os.environ.get('NEWS_API_KEY')
     FOOTBALL_API_KEY = os.environ.get('FOOTBALL_API_KEY')  # keep for fallback
     ODDS_API_KEY = "8645a1f5adca08799ea3b24500f044cc"      # The Odds API key
-    RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')      # <-- ADD THIS LINE
+    RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')      
+    SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
+    FROM_EMAIL = os.environ.get('FROM_EMAIL', 'noreply@yourdomain.com') 
+  
