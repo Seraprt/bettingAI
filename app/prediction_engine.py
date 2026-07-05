@@ -37,6 +37,7 @@ def load_ml_models():
         return
     home_path = 'app/models/xg_home.pkl'
     away_path = 'app/models/xg_away.pkl'
+    logging.info(f"Looking for models at {os.path.abspath(home_path)} and {os.path.abspath(away_path)}")
     if os.path.exists(home_path) and os.path.exists(away_path):
         try:
             _model_home = joblib.load(home_path)

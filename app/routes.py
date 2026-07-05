@@ -300,7 +300,13 @@ def force_predict_all():
 @api.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'alive', 'timestamp': datetime.utcnow().isoformat()}), 200
-
+@api.route('/reload_models', methods=['POST'])
+def reload_models():
+    from .prediction_engine import load_ml_models, _models_loaded
+    # Force reload
+    _models_loaded = False
+    load_ml_models()
+    return jsonify({'message': 'Models reloaded.'}), 200
 @api.route('/ingest', methods=['POST'])
 def ingest():
     from .data_ingestion import fetch_all_football
