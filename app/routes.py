@@ -150,6 +150,7 @@ def profile():
         'username': user['username'],
         'email_or_phone': user['email_or_phone'],
         'is_premium': user.get('is_premium', False),
+        'is_admin': user.get('is_admin', False),   # <-- ADD THIS LINE
         'subscription_plan': user.get('subscription_plan'),
         'subscription_expiry': user.get('subscription_expiry').isoformat() if user.get('subscription_expiry') else None
     })
