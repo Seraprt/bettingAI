@@ -12,7 +12,7 @@ psycopg2-binary>=2.9.9,<3.0
 requests>=2.28,<3.0
 APScheduler>=3.10,<4.0
 textblob>=0.17,<1.0
-
+flask-mail
 numpy>=1.26,<3.0
 scipy>=1.10,<2.0
 pandas>=2.0,<3.0

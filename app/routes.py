@@ -14,7 +14,7 @@ from .auth import (
     create_subscription_request, approve_subscription, decline_subscription,
     revoke_subscription, get_all_subscription_requests, expire_all_expired,
     get_analytics, request_password_reset, reset_password, is_admin_credentials,
-    decode_token, generate_token, hash_password, check_password
+    decode_token, generate_token, hash_password, check_password, send_reset_email
 )
 
 api = Blueprint('api', __name__)
@@ -95,14 +95,21 @@ def login():
 @api.route('/forgot-password', methods=['POST'])
 def forgot_password():
     data = request.json
-    email_or_phone = data.get('email_or_phone')
-    if not email_or_phone:
-        return jsonify({'error': 'Email or phone required'}), 400
-    token, msg = request_password_reset(email_or_phone)
+    email = data.get('email')   # now only email
+    if not email:
+        return jsonify({'error': 'Email required'}), 400
+    if '@' not in email:
+        return jsonify({'error': 'Invalid email address'}), 400
+
+    token, msg = request_password_reset(email)   # we'll update this function to look up by email
     if not token:
         return jsonify({'error': msg}), 404
-    # In production, send token via email/SMS. Return for testing.
-    return jsonify({'message': msg, 'reset_token': token}), 200
+
+    success = send_reset_email(email, token)
+    if not success:
+        return jsonify({'error': 'Could not send email'}), 500
+
+    return jsonify({'message': 'Reset link sent to your email'}), 200
 
 @api.route('/reset-password', methods=['POST'])
 def reset_password_route():
@@ -296,12 +303,15 @@ def today_matches():
     for m in matches:
         home = db.teams.find_one({'_id': m['home_team_id']})
         away = db.teams.find_one({'_id': m['away_team_id']})
+        # Format match time
+        match_time = m['date'].strftime('%H:%M') if m.get('date') else 'TBD'
         result.append({
             'id': str(m['_id']),
             'home': home['name'] if home else 'Unknown',
             'away': away['name'] if away else 'Unknown',
             'tournament': m.get('tournament'),
             'date': m['date'].isoformat(),
+            'time': match_time,
             'time_remaining': get_time_remaining(m['date'])
         })
     return jsonify(result)

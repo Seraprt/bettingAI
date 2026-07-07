@@ -4,11 +4,12 @@ import time
 import requests
 from flask import Flask
 from flask_cors import CORS
+from flask_mail import Mail
 from .config import Config
 from .db import db
 from .routes import api
 from .scheduler import start_scheduler
-from .train_model import run_training 
+from .train_model import run_training
 from .prediction_engine import predict
 import logging
 
@@ -29,13 +30,18 @@ def keep_alive():
 
 def run_training_thread():
     """Wait a bit then run training once."""
-    time.sleep(30)  # give the app time to fully start
+    time.sleep(30)
     logging.info("🚀 Starting background training...")
     run_training()
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+
+    # ---- INITIALISE FLASK-MAIL ----
+    mail = Mail(app)
+    app.extensions['mail'] = mail   # so auth.py can access it
+
     CORS(app, origins=["*"])
     app.register_blueprint(api, url_prefix='/api')
 
@@ -44,7 +50,6 @@ def create_app():
         db.matches.create_index([('date', 1)])
         db.matches.create_index([('home_team_id', 1), ('away_team_id', 1)])
 
-        # Startup prediction (as before)
         logging.info("🚀 Running startup prediction for all matches...")
         matches = list(db.matches.find())
         count = 0
@@ -63,7 +68,6 @@ def create_app():
             keep_alive_thread.start()
             logging.info("✅ Keep-alive thread started (pings every 4 minutes)")
 
-            # ---- START TRAINING ON STARTUP ----
             training_thread = threading.Thread(target=run_training_thread, daemon=True)
             training_thread.start()
             logging.info("✅ Training thread scheduled to run in 30 seconds.")

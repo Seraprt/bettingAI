@@ -4,45 +4,12 @@ import datetime
 import uuid
 import logging
 from flask import current_app
+from flask_mail import Message
 from .db import db
 from bson import ObjectId
 from .config import Config
 
-SECRET_KEY = Config.SECRET_KEY  # use the same secret from config
-
-# ---------- Email integration with SendGrid ----------
-try:
-    import sendgrid
-    from sendgrid.helpers.mail import Mail
-    SENDGRID_AVAILABLE = True
-except ImportError:
-    SENDGRID_AVAILABLE = False
-    logging.warning("SendGrid not installed. Email sending disabled.")
-
-def send_reset_email(email, token):
-    """Send a password reset email using SendGrid."""
-    if not SENDGRID_AVAILABLE:
-        logging.error("SendGrid not available")
-        return False
-    sg = sendgrid.SendGridAPIClient(api_key=Config.SENDGRID_API_KEY)
-    reset_link = f"https://your-frontend-domain.com/reset-password?token={token}"
-    message = Mail(
-        from_email=Config.FROM_EMAIL,
-        to_emails=email,
-        subject="Password Reset Request",
-        html_content=f"""
-        <p>You requested a password reset.</p>
-        <p>Click the link below to reset your password:</p>
-        <a href='{reset_link}'>{reset_link}</a>
-        <p>This link will expire in 24 hours.</p>
-        """
-    )
-    try:
-        response = sg.send(message)
-        return response.status_code == 202
-    except Exception as e:
-        logging.error(f"SendGrid error: {e}")
-        return False
+SECRET_KEY = Config.SECRET_KEY
 
 # ---------- Password hashing ----------
 def hash_password(password):
@@ -103,7 +70,6 @@ def is_premium(user_id):
         return False
     if user.get('is_premium') and user.get('subscription_expiry') and user['subscription_expiry'] > datetime.datetime.utcnow():
         return True
-    # If expired, set is_premium to False
     if user.get('is_premium') and user.get('subscription_expiry') and user['subscription_expiry'] <= datetime.datetime.utcnow():
         db.users.update_one({'_id': ObjectId(user_id)}, {'$set': {'is_premium': False}})
     return False
@@ -204,9 +170,9 @@ def get_analytics():
         'declined': declined
     }
 
-# ---------- Password reset ----------
-def request_password_reset(email_or_phone):
-    user = db.users.find_one({'email_or_phone': email_or_phone})
+# ---------- Password reset (email only) ----------
+def request_password_reset(email):
+    user = db.users.find_one({'email_or_phone': email})
     if not user:
         return None, "User not found"
     token = str(uuid.uuid4())
@@ -218,6 +184,28 @@ def request_password_reset(email_or_phone):
     })
     return token, "Password reset token generated"
 
+def send_reset_email(email, token):
+    reset_link = f"https://xtech-bet.onrender.com/reset-password?token={token}"
+    msg = Message(
+        subject="Password Reset",
+        recipients=[email],
+        html=f"""
+        <p>You requested a password reset.</p>
+        <p>Click the link below to set a new password:</p>
+        <a href='{reset_link}'>{reset_link}</a>
+        <p>This link expires in 24 hours.</p>
+        """
+    )
+    try:
+        mail = current_app.extensions.get('mail')
+        if mail:
+            mail.send(msg)
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"Mail error: {e}")
+        return False
+
 def reset_password(token, new_password):
     record = db.password_reset_tokens.find_one({'token': token})
     if not record or record['expires_at'] < datetime.datetime.utcnow():
@@ -227,7 +215,7 @@ def reset_password(token, new_password):
     db.password_reset_tokens.delete_one({'_id': record['_id']})
     return "Password updated"
 
-# ---------- Admin credentials (hardcoded) ----------
+# ---------- Admin credentials ----------
 ADMIN_USERNAME = "Obasi excellent"
 ADMIN_PASSWORD_HASH = hash_password("Excel1234@$")
 
