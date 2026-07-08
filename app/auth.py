@@ -204,14 +204,12 @@ def send_reset_email(email, token):
         "htmlContent": f"<p>Click <a href='{reset_link}'>here</a> to reset your password.</p>"
     }
     try:
-        # Use a short timeout and avoid netrc/auth issues
         resp = requests.post(
             url,
             json=payload,
             headers=headers,
             timeout=10,
-            auth=None,           # disable netrc auth
-            trust_env=False      # ignore proxy/.netrc environment
+            auth=None   # disable netrc auth
         )
         if resp.status_code == 201:
             return True
@@ -224,7 +222,6 @@ def send_reset_email(email, token):
     except Exception as e:
         logging.error(f"Brevo API request failed: {e}")
         return False
-
 def reset_password(token, new_password):
     record = db.password_reset_tokens.find_one({'token': token})
     if not record or record['expires_at'] < datetime.datetime.utcnow():
