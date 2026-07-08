@@ -355,6 +355,30 @@ def get_prediction(match_id):
         logging.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
+
+@api.route('/check-username', methods=['POST'])
+def check_username():
+    data = request.json
+    username = data.get('username')
+    if not username:
+        return jsonify({'available': False, 'suggestions': []}), 400
+
+    existing = db.users.find_one({'username': username})
+    if existing:
+        # Generate up to 5 suggestions by appending numbers
+        suggestions = []
+        base = username
+        i = 1
+        while len(suggestions) < 5:
+            alt = f"{base}{i}"
+            if not db.users.find_one({'username': alt}):
+                suggestions.append(alt)
+            i += 1
+            if i > 20:  # safety limit
+                break
+        return jsonify({'available': False, 'suggestions': suggestions})
+    else:
+        return jsonify({'available': True, 'suggestions': []})
 @api.route('/best_bets', methods=['GET'])
 @require_auth
 @require_premium
