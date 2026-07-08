@@ -184,28 +184,26 @@ def request_password_reset(email):
     })
     return token, "Password reset token generated"
 
+import sib_api_v3_sdk
+from sib_api_v3_sdk.rest import ApiException
+
 def send_reset_email(email, token):
+    configuration = sib_api_v3_sdk.Configuration()
+    configuration.api_key['api-key'] = Config.BREVO_API_KEY  # add to .env
+    api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
     reset_link = f"https://xtech-bet.onrender.com/reset-password?token={token}"
-    msg = Message(
+    send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+        to=[{"email": email}],
+        sender={"email": Config.MAIL_DEFAULT_SENDER, "name": "Xtech-SmartStakes"},
         subject="Password Reset",
-        recipients=[email],
-        html=f"""
-        <p>You requested a password reset.</p>
-        <p>Click the link below to set a new password:</p>
-        <a href='{reset_link}'>{reset_link}</a>
-        <p>This link expires in 24 hours.</p>
-        """
+        html_content=f"<p>Click <a href='{reset_link}'>here</a> to reset your password.</p>"
     )
     try:
-        mail = current_app.extensions.get('mail')
-        if mail:
-            mail.send(msg)
-            return True
+        api_instance.send_transac_email(send_smtp_email)
+        return True
+    except ApiException as e:
+        logging.error(f"Brevo API error: {e}")
         return False
-    except Exception as e:
-        logging.error(f"Mail error: {e}")
-        return False
-
 def reset_password(token, new_password):
     record = db.password_reset_tokens.find_one({'token': token})
     if not record or record['expires_at'] < datetime.datetime.utcnow():

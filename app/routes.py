@@ -431,7 +431,7 @@ def best_bets():
 def sure_bets():
     min_prob = float(request.args.get('min_prob', 0.6))
     min_confidence = float(request.args.get('min_confidence', 0.5))
-    days_ahead = int(request.args.get('days_ahead', 3))
+    days_ahead = int(request.args.get('days_ahead', 6))
 
     now = datetime.utcnow()
     future = now + timedelta(days=days_ahead)

@@ -15,6 +15,7 @@ class Config:
     # Email (Brevo SMTP)
     MAIL_SERVER = 'smtp-relay.brevo.com'
     MAIL_PORT = 587
+    BREVO_API_KEY = os.environ.get('BREVO_API_KEY')
     MAIL_USE_TLS = True
     MAIL_USE_SSL = False
     MAIL_USERNAME = os.environ.get('MAIL_USERNAME')

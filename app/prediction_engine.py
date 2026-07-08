@@ -184,6 +184,10 @@ def compute_match_factors(match_doc):
         home_xg = max(0.3, min(3.5, home_xg))
         away_xg = max(0.3, min(3.5, away_xg))
 
+    # Convert numpy floats to Python floats (for MongoDB)
+    home_xg = float(home_xg)
+    away_xg = float(away_xg)
+
     return home_factors, away_factors, weather_mult, home_xg, away_xg, context
 
 # ------------------------------------------------------------------
@@ -230,21 +234,24 @@ def predict(match_doc):
         confidence = 0.5 * agreement + 0.5 * extremity
         confidence = min(1, confidence)
 
+        # Convert numpy floats to Python floats before saving
+        update_data = {
+            'home_win_prob': float(home_win),
+            'draw_prob': float(draw),
+            'away_win_prob': float(away_win),
+            'confidence': float(confidence),
+            'home_factors': home_factors,
+            'away_factors': away_factors,
+            'home_xg': float(h_xg),
+            'away_xg': float(a_xg),
+            'weather_temp': match_doc.get('weather_temp'),
+            'weather_condition': match_doc.get('weather_condition'),
+            'context': context
+        }
+
         db.matches.update_one(
             {'_id': match_doc['_id']},
-            {'$set': {
-                'home_win_prob': home_win,
-                'draw_prob': draw,
-                'away_win_prob': away_win,
-                'confidence': confidence,
-                'home_factors': home_factors,
-                'away_factors': away_factors,
-                'home_xg': h_xg,
-                'away_xg': a_xg,
-                'weather_temp': match_doc.get('weather_temp'),
-                'weather_condition': match_doc.get('weather_condition'),
-                'context': context
-            }}
+            {'$set': update_data}
         )
     except Exception as e:
         logging.error(f"Error in predict: {e}")
