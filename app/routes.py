@@ -647,15 +647,21 @@ def prediction_accuracy():
 
 
 @api.route('/recompute_all', methods=['POST'])
+@require_auth
+@require_admin
 def recompute_all():
-    matches = list(db.matches.find())
+    total = db.matches.count_documents({})
     count = 0
-    for m in matches:
-        # Remove existing prediction fields (optional) or just overwrite them
-        # We'll call predict() which updates the document
+    cursor = db.matches.find()   # lazy cursor – no list conversion
+
+    for m in cursor:
         try:
-            predict(m)  # this will recompute and save
+            predict(m)
             count += 1
+            if count % 50 == 0:
+                logging.info(f"🔄 Recompute progress: {count}/{total} matches processed")
         except Exception as e:
-            logging.error(f"Failed to recompute {m['_id']}: {e}")
-    return jsonify({'message': f'Recomputed predictions for {count} matches out of {len(matches)} total.'}), 200
+            logging.error(f"❌ Failed to recompute match {m['_id']}: {e}")
+
+    logging.info(f"✅ Recompute completed: {count} matches out of {total}.")
+    return jsonify({'message': f'Recomputed {count} matches out of {total} total.'}), 200

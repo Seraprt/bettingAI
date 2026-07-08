@@ -28,12 +28,6 @@ def keep_alive():
             logging.error(f"❌ Keep-alive ping error: {e}")
         time.sleep(4 * 60)
 
-def run_training_thread():
-    """Wait a bit then run training once."""
-    time.sleep(30)
-    logging.info("🚀 Starting background training...")
-    run_training()
-
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -68,8 +62,6 @@ def create_app():
             keep_alive_thread.start()
             logging.info("✅ Keep-alive thread started (pings every 4 minutes)")
 
-            training_thread = threading.Thread(target=run_training_thread, daemon=True)
-            training_thread.start()
-            logging.info("✅ Training thread scheduled to run in 30 seconds.")
+           
 
     return app

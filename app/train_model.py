@@ -14,6 +14,7 @@ from app.factors import (
 from bson import ObjectId
 import logging
 import time
+from .cloud_storage import check_cloud_connection, upload_file   # <-- import
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -69,6 +70,16 @@ def build_feature_matrix(matches):
     return np.array(features), np.array(targets_home), np.array(targets_away)
 
 def train():
+    # ---- CHECK CLOUD CONNECTION FIRST ----
+    cloud_ok, cloud_msg = check_cloud_connection()
+    if cloud_ok:
+        logging.info(f"☁️ {cloud_msg}")
+        logging.info("📤 Models will be uploaded to cloud after training.")
+    else:
+        logging.warning(f"☁️ {cloud_msg}")
+        logging.warning("💾 Models will be saved locally only (cloud upload skipped).")
+
+    # ---- START TRAINING ----
     logging.info("🚀 Starting training on ALL finished matches...")
     logging.info("📊 Loading finished matches (no limit)...")
     
@@ -102,7 +113,7 @@ def train():
     model_home.fit(X_train, y_home_train, verbose=True)
     home_pred = model_home.predict(X_test)
     home_mae = mean_absolute_error(y_home_test, home_pred)
-    home_rmse = np.sqrt(mean_squared_error(y_home_test, home_pred))   # <-- fixed
+    home_rmse = np.sqrt(mean_squared_error(y_home_test, home_pred))
     home_r2 = r2_score(y_home_test, home_pred)
     logging.info(f"✅ Home goals: MAE={home_mae:.3f}, RMSE={home_rmse:.3f}, R²={home_r2:.3f}")
 
@@ -118,19 +129,30 @@ def train():
     model_away.fit(X_train, y_away_train, verbose=True)
     away_pred = model_away.predict(X_test)
     away_mae = mean_absolute_error(y_away_test, away_pred)
-    away_rmse = np.sqrt(mean_squared_error(y_away_test, away_pred))   # <-- fixed
+    away_rmse = np.sqrt(mean_squared_error(y_away_test, away_pred))
     away_r2 = r2_score(y_away_test, away_pred)
     logging.info(f"✅ Away goals: MAE={away_mae:.3f}, RMSE={away_rmse:.3f}, R²={away_r2:.3f}")
 
+    # ---- SAVE LOCALLY ----
     os.makedirs('app/models', exist_ok=True)
     joblib.dump(model_home, 'app/models/xg_home.pkl')
     joblib.dump(model_away, 'app/models/xg_away.pkl')
-    logging.info(f"✅ Models saved to {os.path.abspath('app/models/')}")
+    logging.info(f"💾 Models saved locally to {os.path.abspath('app/models/')}")
+
+    # ---- UPLOAD TO CLOUD (if connection is OK) ----
+    if cloud_ok:
+        upload_file('app/models/xg_home.pkl', 'models/xg_home.pkl')
+        upload_file('app/models/xg_away.pkl', 'models/xg_away.pkl')
+        logging.info("☁️ Models uploaded to cloud storage.")
+    else:
+        logging.info("💾 Cloud upload skipped (models saved locally only).")
+
 def run_training():
     """Wrapper function to be called from outside (threads, endpoints)."""
     try:
         train()
     except Exception as e:
         logging.error(f"Training failed: {e}")
+
 if __name__ == '__main__':
     train()

@@ -2,6 +2,7 @@ import math
 import numpy as np
 from scipy.stats import poisson, norm
 from .db import db
+
 from .factors import (
     get_form_score, get_strength_score, get_availability_score,
     get_tournament_factor, get_coach_score, get_home_away_score,
@@ -12,6 +13,8 @@ import logging
 import os
 import joblib
 from datetime import datetime
+
+from .cloud_storage import download_file, list_models
 
 WEIGHTS = {
     'form': 0.20,
@@ -31,26 +34,34 @@ _model_home = None
 _model_away = None
 _models_loaded = False
 
+
 def load_ml_models():
     global _model_home, _model_away, _models_loaded
     if _models_loaded:
         return
-    home_path = 'app/models/xg_home.pkl'
-    away_path = 'app/models/xg_away.pkl'
-    logging.info(f"Looking for models at {os.path.abspath(home_path)} and {os.path.abspath(away_path)}")
-    if os.path.exists(home_path) and os.path.exists(away_path):
-        try:
-            _model_home = joblib.load(home_path)
-            _model_away = joblib.load(away_path)
-            _models_loaded = True
-            logging.info("✅ ML models loaded successfully.")
-        except Exception as e:
-            logging.error(f"Failed to load ML models: {e}")
-            _models_loaded = True
-    else:
-        logging.info("ℹ️ ML models not found. Using heuristic xG.")
-        _models_loaded = True
 
+    local_home = 'app/models/xg_home.pkl'
+    local_away = 'app/models/xg_away.pkl'
+
+    # Check if local files exist; if not, try downloading from cloud
+    if not os.path.exists(local_home) or not os.path.exists(local_away):
+        logging.info("📥 Local models not found, downloading from cloud...")
+        if download_file('models/xg_home.pkl', local_home) and download_file('models/xg_away.pkl', local_away):
+            logging.info("✅ Models downloaded from cloud.")
+        else:
+            logging.warning("⚠️ Could not download models from cloud. Using heuristic.")
+            _models_loaded = True
+            return
+
+    # Load models (local or newly downloaded)
+    try:
+        _model_home = joblib.load(local_home)
+        _model_away = joblib.load(local_away)
+        _models_loaded = True
+        logging.info("✅ ML models loaded successfully.")
+    except Exception as e:
+        logging.error(f"Failed to load ML models: {e}")
+        _models_loaded = True
 # ------------------------------------------------------------------
 # 1. Match context analysis
 # ------------------------------------------------------------------
