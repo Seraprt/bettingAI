@@ -6,7 +6,6 @@ bcrypt
 pyjwt
 
 python-dotenv>=1.0,<2.0
-sib_api_v3_sdk
 psycopg2-binary>=2.9.9,<3.0
 
 requests>=2.28,<3.0
