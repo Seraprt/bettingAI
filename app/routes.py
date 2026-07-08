@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, g
 from .db import db
+import threading
 from bson import ObjectId
 from datetime import datetime, timedelta
 import logging
@@ -517,15 +518,32 @@ def predict_all():
                 logging.error(f"Failed to predict {m['_id']}: {e}")
     return jsonify({'message': f'Predictions computed for {count} matches.'}), 200
 
+
+
+# Flag to prevent multiple training runs
+_training_in_progress = False
+
 @api.route('/train', methods=['POST'])
 def trigger_training():
+    global _training_in_progress
+    if _training_in_progress:
+        return jsonify({'message': 'Training already in progress. Please wait.'}), 409
+
     from .train_model import run_training
-    try:
-        run_training()
-        return jsonify({'message': 'Training completed successfully.'}), 200
-    except Exception as e:
-        logging.error(f"Training failed: {e}")
-        return jsonify({'error': str(e)}), 500
+    _training_in_progress = True
+
+    def training_task():
+        global _training_in_progress
+        try:
+            run_training()
+        except Exception as e:
+            logging.error(f"Training failed: {e}")
+        finally:
+            _training_in_progress = False
+
+    thread = threading.Thread(target=training_task, daemon=True)
+    thread.start()
+    return jsonify({'message': 'Training started in background. Check logs for progress.'}), 202
 
 @api.route('/available_markets', methods=['GET'])
 def available_markets():
