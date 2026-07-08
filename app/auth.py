@@ -3,19 +3,11 @@ import jwt
 import datetime
 import uuid
 import logging
+import requests
 from flask import current_app
 from .db import db
 from bson import ObjectId
 from .config import Config
-
-# ----- Brevo API (formerly Sendinblue) -----
-try:
-    import brevo_python as sib_api_v3_sdk
-    from brevo_python.rest import ApiException
-    BREVO_AVAILABLE = True
-except ImportError:
-    BREVO_AVAILABLE = False
-    logging.warning("brevo-python not installed – email sending disabled.")
 
 SECRET_KEY = Config.SECRET_KEY
 
@@ -178,7 +170,7 @@ def get_analytics():
         'declined': declined
     }
 
-# ---------- Password reset (email only – Brevo API) ----------
+# ---------- Password reset (email only – Brevo API via requests) ----------
 def request_password_reset(email):
     user = db.users.find_one({'email_or_phone': email})
     if not user:
@@ -193,24 +185,33 @@ def request_password_reset(email):
     return token, "Password reset token generated"
 
 def send_reset_email(email, token):
-    if not BREVO_AVAILABLE:
-        logging.error("Brevo SDK not available – email not sent.")
+    api_key = Config.BREVO_API_KEY
+    if not api_key:
+        logging.error("BREVO_API_KEY not set – email not sent.")
         return False
+
+    reset_link = f"https://xtech-bet.onrender.com/reset-password?token={token}"
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {
+        "api-key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    payload = {
+        "sender": {"email": Config.MAIL_DEFAULT_SENDER, "name": "Xtech-SmartStakes"},
+        "to": [{"email": email}],
+        "subject": "Password Reset",
+        "htmlContent": f"<p>Click <a href='{reset_link}'>here</a> to reset your password.</p>"
+    }
     try:
-        configuration = sib_api_v3_sdk.Configuration()
-        configuration.api_key['api-key'] = Config.BREVO_API_KEY
-        api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
-        reset_link = f"https://xtech-bet.onrender.com/reset-password?token={token}"
-        send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
-            to=[{"email": email}],
-            sender={"email": Config.MAIL_DEFAULT_SENDER, "name": "Xtech-SmartStakes"},
-            subject="Password Reset",
-            html_content=f"<p>Click <a href='{reset_link}'>here</a> to reset your password.</p>"
-        )
-        api_instance.send_transac_email(send_smtp_email)
-        return True
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        if resp.status_code == 201:
+            return True
+        else:
+            logging.error(f"Brevo API error: {resp.status_code} - {resp.text}")
+            return False
     except Exception as e:
-        logging.error(f"Brevo API error: {e}")
+        logging.error(f"Brevo API request failed: {e}")
         return False
 
 def reset_password(token, new_password):
