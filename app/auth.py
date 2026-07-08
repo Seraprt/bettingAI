@@ -186,7 +186,6 @@ def request_password_reset(email):
 
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
-
 def send_reset_email(email, token):
     configuration = sib_api_v3_sdk.Configuration()
     configuration.api_key['api-key'] = Config.BREVO_API_KEY  # add to .env
