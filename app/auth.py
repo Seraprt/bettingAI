@@ -204,12 +204,23 @@ def send_reset_email(email, token):
         "htmlContent": f"<p>Click <a href='{reset_link}'>here</a> to reset your password.</p>"
     }
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        # Use a short timeout and avoid netrc/auth issues
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=10,
+            auth=None,           # disable netrc auth
+            trust_env=False      # ignore proxy/.netrc environment
+        )
         if resp.status_code == 201:
             return True
         else:
             logging.error(f"Brevo API error: {resp.status_code} - {resp.text}")
             return False
+    except requests.exceptions.Timeout:
+        logging.error("Brevo API request timed out")
+        return False
     except Exception as e:
         logging.error(f"Brevo API request failed: {e}")
         return False
