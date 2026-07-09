@@ -299,7 +299,8 @@ _recompute_in_progress = False
 def admin_status():
     return jsonify({
         'training': 'running' if _training_in_progress else 'idle',
-        'recompute': 'running' if _recompute_in_progress else 'idle'
+        'recompute': 'running' if _recompute_in_progress else 'idle',
+        'ingestion': 'running' if _ingestion_in_progress else 'idle'
     }), 200
 # ------------------------------------------------------------------
 # Prediction endpoints (with access control)
@@ -696,7 +697,32 @@ def ingest():
     from .data_ingestion import fetch_all_football
     fetch_all_football()
     return jsonify({'message': 'Ingestion triggered.'}), 200
+# Global flag for ingestion
+_ingestion_in_progress = False
 
+def ingestion_task():
+    global _ingestion_in_progress
+    from .data_ingestion import fetch_all_football
+    logging.info("🚀 Ingestion started in background.")
+    try:
+        fetch_all_football()
+        logging.info("✅ Ingestion completed successfully.")
+    except Exception as e:
+        logging.error(f"❌ Ingestion failed: {e}")
+    finally:
+        _ingestion_in_progress = False
+
+@api.route('/admin/ingest', methods=['POST'])
+@require_auth
+@require_admin
+def admin_ingest():
+    global _ingestion_in_progress
+    if _ingestion_in_progress:
+        return jsonify({'message': 'Ingestion already in progress.'}), 409
+    _ingestion_in_progress = True
+    thread = threading.Thread(target=ingestion_task, daemon=True)
+    thread.start()
+    return jsonify({'message': 'Ingestion started in background. Check logs for progress.'}), 202
 @api.route('/prediction_accuracy', methods=['GET'])
 def prediction_accuracy():
     predictions = list(db.predictions.find({'actual_outcome': {'$ne': None}}))
