@@ -463,11 +463,15 @@ def best_bets():
     })
 
 
+
+# Global flag (add near top)
 _recompute_in_progress = False
 
 def recompute_all_task():
     global _recompute_in_progress
+    logging.info("🔄 Recompute task started.")
     total = db.matches.count_documents({})
+    logging.info(f"📊 Total matches to recompute: {total}")
     count = 0
     cursor = db.matches.find()
     for m in cursor:
@@ -477,7 +481,7 @@ def recompute_all_task():
             if count % 50 == 0:
                 logging.info(f"🔄 Recompute progress: {count}/{total} matches processed")
         except Exception as e:
-            logging.error(f"❌ Failed to recompute {m['_id']}: {e}")
+            logging.error(f"❌ Failed to recompute match {m['_id']}: {e}")
     logging.info(f"✅ Recompute completed: {count} matches out of {total}.")
     _recompute_in_progress = False
 
@@ -487,10 +491,14 @@ def recompute_all_task():
 def recompute_all():
     global _recompute_in_progress
     if _recompute_in_progress:
+        logging.warning("⚠️ Recompute already in progress – request rejected.")
         return jsonify({'message': 'Recompute already in progress.'}), 409
+
+    logging.info("🚀 Recompute requested by admin.")
     _recompute_in_progress = True
     thread = threading.Thread(target=recompute_all_task, daemon=True)
     thread.start()
+    logging.info("✅ Recompute thread started. Check logs for progress.")  
     return jsonify({'message': 'Recompute started in background. Check logs for progress.'}), 202
 
 @api.route('/sure_bets', methods=['GET'])
