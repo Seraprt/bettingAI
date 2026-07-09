@@ -289,6 +289,18 @@ def admin_users():
         })
     return jsonify(result)
 
+# Global flags (add near the top)
+_training_in_progress = False
+_recompute_in_progress = False
+
+@api.route('/admin/status', methods=['GET'])
+@require_auth
+@require_admin
+def admin_status():
+    return jsonify({
+        'training': 'running' if _training_in_progress else 'idle',
+        'recompute': 'running' if _recompute_in_progress else 'idle'
+    }), 200
 # ------------------------------------------------------------------
 # Prediction endpoints (with access control)
 # ------------------------------------------------------------------
@@ -449,6 +461,38 @@ def best_bets():
         'bets': limited_bets,
         'available_markets': sorted(list(all_markets))
     })
+
+
+    import threading
+_recompute_in_progress = False
+
+def recompute_all_task():
+    global _recompute_in_progress
+    total = db.matches.count_documents({})
+    count = 0
+    cursor = db.matches.find()
+    for m in cursor:
+        try:
+            predict(m)
+            count += 1
+            if count % 50 == 0:
+                logging.info(f"🔄 Recompute progress: {count}/{total} matches processed")
+        except Exception as e:
+            logging.error(f"❌ Failed to recompute {m['_id']}: {e}")
+    logging.info(f"✅ Recompute completed: {count} matches out of {total}.")
+    _recompute_in_progress = False
+
+@api.route('/recompute_all', methods=['POST'])
+@require_auth
+@require_admin
+def recompute_all():
+    global _recompute_in_progress
+    if _recompute_in_progress:
+        return jsonify({'message': 'Recompute already in progress.'}), 409
+    _recompute_in_progress = True
+    thread = threading.Thread(target=recompute_all_task, daemon=True)
+    thread.start()
+    return jsonify({'message': 'Recompute started in background. Check logs for progress.'}), 202
 
 @api.route('/sure_bets', methods=['GET'])
 @require_auth
@@ -664,7 +708,7 @@ def prediction_accuracy():
     })
 
 
-@api.route('/recompute_all', methods=['POST'])
+@api.route('/recompute_alll', methods=['POST'])
 @require_auth
 @require_admin
 def recompute_all():
