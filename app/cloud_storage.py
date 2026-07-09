@@ -77,6 +77,8 @@ def download_file(s3_key, local_path):
         logger.warning("❌ AWS_S3_BUCKET not set – skipping download.")
         return False
     try:
+        # --- FIX: create the parent directory if it doesn't exist ---
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
         s3 = get_s3_client()
         s3.download_file(Config.AWS_S3_BUCKET, s3_key, local_path)
         logger.info(f"✅ Downloaded s3://{Config.AWS_S3_BUCKET}/{s3_key} to {local_path}")
