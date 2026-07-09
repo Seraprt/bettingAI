@@ -463,7 +463,6 @@ def best_bets():
     })
 
 
-    import threading
 _recompute_in_progress = False
 
 def recompute_all_task():
@@ -708,22 +707,3 @@ def prediction_accuracy():
     })
 
 
-@api.route('/recompute_alll', methods=['POST'])
-@require_auth
-@require_admin
-def recompute_all():
-    total = db.matches.count_documents({})
-    count = 0
-    cursor = db.matches.find()   # lazy cursor – no list conversion
-
-    for m in cursor:
-        try:
-            predict(m)
-            count += 1
-            if count % 50 == 0:
-                logging.info(f"🔄 Recompute progress: {count}/{total} matches processed")
-        except Exception as e:
-            logging.error(f"❌ Failed to recompute match {m['_id']}: {e}")
-
-    logging.info(f"✅ Recompute completed: {count} matches out of {total}.")
-    return jsonify({'message': f'Recomputed {count} matches out of {total} total.'}), 200
