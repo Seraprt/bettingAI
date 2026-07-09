@@ -2,18 +2,17 @@ import math
 import numpy as np
 from scipy.stats import poisson, norm
 from .db import db
-
 from .factors import (
     get_form_score, get_strength_score, get_availability_score,
     get_tournament_factor, get_coach_score, get_home_away_score,
-    get_h2h_score, get_weather_score, get_fatigue_score, get_news_score
+    get_h2h_score, get_weather_score, get_fatigue_score, get_news_score,
+    get_attack_rating, get_defence_rating   # <-- NEW imports
 )
 from .utils import get_weather
 import logging
 import os
 import joblib
 from datetime import datetime
-
 from .cloud_storage import download_file, list_models
 
 WEIGHTS = {
@@ -34,6 +33,10 @@ _model_home = None
 _model_away = None
 _models_loaded = False
 
+# League average goals (for attack/defence xG)
+LEAGUE_AVG_HOME = 1.35
+LEAGUE_AVG_AWAY = 1.05
+
 
 def load_ml_models():
     global _model_home, _model_away, _models_loaded
@@ -43,7 +46,6 @@ def load_ml_models():
     local_home = 'app/models/xg_home.pkl'
     local_away = 'app/models/xg_away.pkl'
 
-    # Check if local files exist; if not, try downloading from cloud
     if not os.path.exists(local_home) or not os.path.exists(local_away):
         logging.info("📥 Local models not found, downloading from cloud...")
         if download_file('models/xg_home.pkl', local_home) and download_file('models/xg_away.pkl', local_away):
@@ -53,7 +55,6 @@ def load_ml_models():
             _models_loaded = True
             return
 
-    # Load models (local or newly downloaded)
     try:
         _model_home = joblib.load(local_home)
         _model_away = joblib.load(local_away)
@@ -62,6 +63,8 @@ def load_ml_models():
     except Exception as e:
         logging.error(f"Failed to load ML models: {e}")
         _models_loaded = True
+
+
 # ------------------------------------------------------------------
 # 1. Match context analysis
 # ------------------------------------------------------------------
@@ -101,8 +104,9 @@ def get_match_context(match_doc):
 
     return context
 
+
 # ------------------------------------------------------------------
-# 2. Compute factors and xG
+# 2. Compute factors and xG (using attack/defence ratings)
 # ------------------------------------------------------------------
 def compute_match_factors(match_doc):
     home_id = match_doc['home_team_id']
@@ -153,53 +157,30 @@ def compute_match_factors(match_doc):
         home_factors['home_away'] = 0.5
         away_factors['home_away'] = 0.5
 
-    # ------------------ ML xG ------------------
-    load_ml_models()
-    ml_home_xg = ml_away_xg = None
-    if _model_home is not None and _model_away is not None:
-        # Build feature vector (same order as training)
-        features = [
-            home_factors['form'], away_factors['form'],
-            home_factors['strength'], away_factors['strength'],
-            home_factors['availability'], away_factors['availability'],
-            home_factors['tournament'],
-            home_factors['coach'], away_factors['coach'],
-            home_factors['home_away'], away_factors['home_away'],
-            home_factors['h2h'],
-            home_factors['fatigue'], away_factors['fatigue'],
-            home_factors['news'], away_factors['news']
-        ]
-        X = np.array([features])
-        try:
-            ml_home_xg = _model_home.predict(X)[0]
-            ml_away_xg = _model_away.predict(X)[0]
-            # Clip to reasonable range
-            ml_home_xg = max(0.3, min(3.5, ml_home_xg))
-            ml_away_xg = max(0.3, min(3.5, ml_away_xg))
-        except Exception as e:
-            logging.warning(f"ML prediction failed: {e}. Using heuristic.")
+    # ---- NEW: Compute xG from attack/defence ratings ----
+    home_attack = get_attack_rating(home_id)
+    home_defence = get_defence_rating(home_id)
+    away_attack = get_attack_rating(away_id)
+    away_defence = get_defence_rating(away_id)
 
-    if ml_home_xg is not None and ml_away_xg is not None:
-        home_xg = ml_home_xg
-        away_xg = ml_away_xg
-    else:
-        # Heuristic fallback
-        base_home = 1.2
-        base_away = 1.0
-        home_xg = base_home * (0.5 + 0.5 * home_factors['strength']/100) * (1 + 0.1 * home_factors['form']) + 0.3 * (home_factors['home_away'] - 0.5)
-        away_xg = base_away * (0.5 + 0.5 * away_factors['strength']/100) * (1 + 0.1 * away_factors['form'])
-        home_xg *= (0.9 + 0.1 * home_factors['fatigue'])
-        away_xg *= (0.9 + 0.1 * away_factors['fatigue'])
-        home_xg *= weather_mult
-        away_xg *= weather_mult
-        home_xg = max(0.3, min(3.5, home_xg))
-        away_xg = max(0.3, min(3.5, away_xg))
+    # Expected goals using attack * defence * league average
+    home_xg = LEAGUE_AVG_HOME * home_attack * away_defence
+    away_xg = LEAGUE_AVG_AWAY * away_attack * home_defence
 
-    # Convert numpy floats to Python floats (for MongoDB)
+    # Apply weather multiplier
+    home_xg *= weather_mult
+    away_xg *= weather_mult
+
+    # Clip to reasonable range
+    home_xg = max(0.3, min(3.5, home_xg))
+    away_xg = max(0.3, min(3.5, away_xg))
+
+    # Convert to Python float for MongoDB
     home_xg = float(home_xg)
     away_xg = float(away_xg)
 
     return home_factors, away_factors, weather_mult, home_xg, away_xg, context
+
 
 # ------------------------------------------------------------------
 # 3. Predict 1X2 and store
@@ -245,7 +226,6 @@ def predict(match_doc):
         confidence = 0.5 * agreement + 0.5 * extremity
         confidence = min(1, confidence)
 
-        # Convert numpy floats to Python floats before saving
         update_data = {
             'home_win_prob': float(home_win),
             'draw_prob': float(draw),
@@ -268,8 +248,9 @@ def predict(match_doc):
         logging.error(f"Error in predict: {e}")
         raise
 
+
 # ------------------------------------------------------------------
-# 4. Market probability helpers
+# 4. Market probability helpers (unchanged)
 # ------------------------------------------------------------------
 def poisson_win_prob(h_xg, a_xg):
     prob = 0.0
@@ -301,8 +282,9 @@ def poisson_handicap_prob(h_xg, a_xg, handicap):
                 prob += poisson.pmf(h, h_xg) * poisson.pmf(a, a_xg)
     return prob
 
+
 # ------------------------------------------------------------------
-# 5. Compute all market probabilities (filtered)
+# 5. Compute all market probabilities (unchanged)
 # ------------------------------------------------------------------
 def compute_all_market_probs(h_xg, a_xg):
     probs = {}
@@ -340,6 +322,9 @@ def compute_all_market_probs(h_xg, a_xg):
     p_away_less3 = poisson.cdf(2, a_xg)
     probs['any_team_over_2.5_goals'] = 1 - (p_home_less3 * p_away_less3)
 
+    # Also add "under 2.5" as any_team_under_2.5_goals (for secondary picks)
+    probs['any_team_under_2.5_goals'] = p_home_less3 * p_away_less3
+
     for hcap in [-2, -1.5, -1, 1, 1.5, 2]:
         if hcap < 0:
             probs[f'home_{hcap}'] = poisson_handicap_prob(h_xg, a_xg, hcap)
@@ -373,6 +358,7 @@ def compute_all_market_probs(h_xg, a_xg):
 
     return probs
 
+
 # ------------------------------------------------------------------
 # 6. Helper: most likely correct score
 # ------------------------------------------------------------------
@@ -387,11 +373,13 @@ def get_most_likely_score(h_xg, a_xg):
                 best_score = f"{h}-{a}"
     return best_score
 
+
 # ------------------------------------------------------------------
-# 7. Detailed reason generator (includes correct score)
+# 7. Detailed reason generator (with secondary market)
 # ------------------------------------------------------------------
 def generate_detailed_reason(match_doc, market, probability, confidence,
-                              home_team_name, away_team_name, correct_score):
+                              home_team_name, away_team_name, correct_score,
+                              secondary_market=None, secondary_prob=None):
     home_factors = match_doc.get('home_factors', {})
     away_factors = match_doc.get('away_factors', {})
     context = match_doc.get('context', {})
@@ -489,10 +477,15 @@ def generate_detailed_reason(match_doc, market, probability, confidence,
 
     reason_parts.append(f"🎯 Predicted correct score: {correct_score}")
 
+    # ---- ADD SECONDARY PICK ----
+    if secondary_market and secondary_prob is not None:
+        reason_parts.append(f"📌 Secondary pick: {secondary_market} with {(secondary_prob*100):.1f}% probability")
+
     if not reason_parts:
         reason_parts.append("Factors are balanced, but this market still offers value.")
 
     return " | ".join(reason_parts)
+
 
 # ------------------------------------------------------------------
 # 8. Get best market (for Best Bets)
@@ -557,6 +550,7 @@ def get_best_market(match_doc):
         }
     return None
 
+
 # ------------------------------------------------------------------
 # 9. Kelly staking
 # ------------------------------------------------------------------
@@ -570,8 +564,9 @@ def kelly_fraction(prob, odds):
     kelly = numerator / denominator
     return max(0, min(1, kelly))
 
+
 # ------------------------------------------------------------------
-# 10. Safe markets (for Prediction Detail)
+# 10. Safe markets
 # ------------------------------------------------------------------
 def get_safe_markets(match_doc):
     if match_doc.get('home_xg') is None:
@@ -589,10 +584,17 @@ def get_safe_markets(match_doc):
             safe.append({'market': market, 'probability': round(prob, 4)})
     return safe
 
+
 # ------------------------------------------------------------------
-# 11. Sure bets (ONE per match)
+# 11. Sure bets (ONE per match + secondary pick)
 # ------------------------------------------------------------------
 def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
+    # Define the secondary market list
+    secondary_candidates = [
+        'home_win', '12', 'away_win', '1X', 'X2',
+        'any_team_over_2.5_goals', 'any_team_under_2.5_goals'
+    ]
+
     sure_list = []
     processed = 0
     for match in matches:
@@ -634,8 +636,34 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
 
         if best_market and best_prob >= min_prob:
             correct_score = get_most_likely_score(h_xg, a_xg)
-            reason = generate_detailed_reason(match, best_market, best_prob, confidence,
-                                              home_name, away_name, correct_score)
+
+            # ---- Select secondary market ----
+            secondary_market = None
+            secondary_prob = None
+            # Build a list of candidate scores (market, score) excluding the primary and any that are invalid
+            candidates = []
+            for mkt in secondary_candidates:
+                if mkt == best_market:
+                    continue
+                prob = probs.get(mkt)
+                if prob is None:
+                    continue
+                # For derby, avoid straight win if prob < 0.5
+                if context.get('is_derby') and mkt in ['home_win', 'away_win'] and prob < 0.5:
+                    continue
+                score = prob * confidence
+                candidates.append((score, mkt, prob))
+            if candidates:
+                # Sort by score descending and pick the best
+                candidates.sort(reverse=True, key=lambda x: x[0])
+                secondary_market = candidates[0][1]
+                secondary_prob = candidates[0][2]
+
+            reason = generate_detailed_reason(
+                match, best_market, best_prob, confidence,
+                home_name, away_name, correct_score,
+                secondary_market, secondary_prob
+            )
             sure_list.append({
                 'match': f"{home_name} vs {away_name}",
                 'tournament': match.get('tournament'),
@@ -654,6 +682,7 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
 
     sure_list.sort(key=lambda x: x['score'], reverse=True)
     return sure_list[:20]
+
 
 # ------------------------------------------------------------------
 # 12. Time remaining helper

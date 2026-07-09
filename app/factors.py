@@ -51,7 +51,6 @@ def get_strength_score(team_id):
     if not team:
         return 50.0
     elo = team.get('elo_rating', 1500)
-    # Map Elo 1000–2000 to strength 0–100
     strength = max(0, min(100, (elo - 1000) / 10))
     return strength
 
@@ -187,3 +186,20 @@ def get_news_score(team_id):
     if not team:
         return 0.5
     return get_news_sentiment(team['name'])
+
+# ------------------------------------------------------------------
+# NEW: Attack and Defence Ratings
+# ------------------------------------------------------------------
+def get_attack_rating(team_id):
+    """Return the team's attacking rating (goals scored relative to average)."""
+    team = get_team(team_id)
+    if not team:
+        return 1.0
+    return team.get('attack_rating', 1.0)
+
+def get_defence_rating(team_id):
+    """Return the team's defensive rating (goals conceded relative to average)."""
+    team = get_team(team_id)
+    if not team:
+        return 1.0
+    return team.get('defence_rating', 1.0)

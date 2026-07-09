@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from .db import db
 from .config import Config
 import time
+import math
 
 COMPETITION_TO_SPORT_KEY = {
     'PL': 'soccer_epl',
@@ -21,7 +22,7 @@ COMPETITION_TO_SPORT_KEY = {
 }
 
 # ------------------------------------------------------------
-# ELO UPDATE FUNCTION
+# ELO UPDATE FUNCTION (unchanged)
 # ------------------------------------------------------------
 def update_elo(home_team_id, away_team_id, home_goals, away_goals):
     """Update Elo ratings for both teams based on match result."""
@@ -51,7 +52,66 @@ def update_elo(home_team_id, away_team_id, home_goals, away_goals):
     db.teams.update_one({'_id': away_team_id}, {'$set': {'elo_rating': new_away_elo}})
 
 # ------------------------------------------------------------
-# FETCH AND STORE MATCHES
+# ATTACK / DEFENCE RATINGS UPDATE (NEW)
+# ------------------------------------------------------------
+def update_attack_defence(home_team_id, away_team_id, home_goals, away_goals):
+    """
+    Update attacking and defensive ratings for both teams using a rolling average.
+    Attack rating = goals scored per game relative to league average.
+    Defence rating = goals conceded per game relative to league average.
+    Uses an exponential moving average (alpha = 0.2) to give more weight to recent matches.
+    """
+    if home_goals is None or away_goals is None:
+        return
+
+    # League average goals per game (approximate – you can compute dynamically from your DB)
+    # For now, we use constants: home avg = 1.35, away avg = 1.05
+    LEAGUE_AVG_HOME = 1.35
+    LEAGUE_AVG_AWAY = 1.05
+    ALPHA = 0.2  # weight for new observation
+
+    home = db.teams.find_one({'_id': home_team_id})
+    away = db.teams.find_one({'_id': away_team_id})
+    if not home or not away:
+        return
+
+    # Current ratings (initialise to 1.0 if not present)
+    home_attack = home.get('attack_rating', 1.0)
+    home_defence = home.get('defence_rating', 1.0)
+    away_attack = away.get('attack_rating', 1.0)
+    away_defence = away.get('defence_rating', 1.0)
+
+    # Observed attacking performance = goals scored / league average goals (home/away adjusted)
+    home_observed_attack = home_goals / LEAGUE_AVG_HOME
+    away_observed_attack = away_goals / LEAGUE_AVG_AWAY
+
+    # Observed defensive performance = goals conceded / league average goals (opponent's home/away)
+    home_observed_defence = away_goals / LEAGUE_AVG_HOME   # home conceded away goals
+    away_observed_defence = home_goals / LEAGUE_AVG_AWAY   # away conceded home goals
+
+    # Update ratings using exponential moving average
+    new_home_attack = home_attack * (1 - ALPHA) + home_observed_attack * ALPHA
+    new_home_defence = home_defence * (1 - ALPHA) + home_observed_defence * ALPHA
+    new_away_attack = away_attack * (1 - ALPHA) + away_observed_attack * ALPHA
+    new_away_defence = away_defence * (1 - ALPHA) + away_observed_defence * ALPHA
+
+    # Clip to reasonable range to avoid extremes
+    new_home_attack = max(0.3, min(2.5, new_home_attack))
+    new_home_defence = max(0.3, min(2.5, new_home_defence))
+    new_away_attack = max(0.3, min(2.5, new_away_attack))
+    new_away_defence = max(0.3, min(2.5, new_away_defence))
+
+    db.teams.update_one({'_id': home_team_id}, {'$set': {
+        'attack_rating': new_home_attack,
+        'defence_rating': new_home_defence
+    }})
+    db.teams.update_one({'_id': away_team_id}, {'$set': {
+        'attack_rating': new_away_attack,
+        'defence_rating': new_away_defence
+    }})
+
+# ------------------------------------------------------------
+# FETCH AND STORE MATCHES (with attack/defence update)
 # ------------------------------------------------------------
 def fetch_matches_in_range(headers, date_from, date_to):
     url = 'https://api.football-data.org/v4/matches'
@@ -83,12 +143,11 @@ def store_matches(matches):
         home_goals = match['score']['fullTime']['home'] if status == 'FINISHED' else None
         away_goals = match['score']['fullTime']['away'] if status == 'FINISHED' else None
 
-        # Ensure team names are not empty
         if not home_name or not away_name:
             print(f"Skipping match with empty team names: {home_name} vs {away_name}")
             continue
 
-        # Create/update home team
+        # Create/update home team (add attack/defence fields)
         home = db.teams.find_one({'name': home_name, 'sport': 'football'})
         if not home:
             home_id = db.teams.insert_one({
@@ -101,12 +160,13 @@ def store_matches(matches):
                 'coach_win_rate': 0.5,
                 'matches_coached': 0,
                 'latitude': None,
-                'longitude': None
+                'longitude': None,
+                'attack_rating': 1.0,    # NEW
+                'defence_rating': 1.0    # NEW
             }).inserted_id
         else:
             home_id = home['_id']
 
-        # Create/update away team
         away = db.teams.find_one({'name': away_name, 'sport': 'football'})
         if not away:
             away_id = db.teams.insert_one({
@@ -119,7 +179,9 @@ def store_matches(matches):
                 'coach_win_rate': 0.5,
                 'matches_coached': 0,
                 'latitude': None,
-                'longitude': None
+                'longitude': None,
+                'attack_rating': 1.0,    # NEW
+                'defence_rating': 1.0    # NEW
             }).inserted_id
         else:
             away_id = away['_id']
@@ -142,9 +204,10 @@ def store_matches(matches):
             upsert=True
         )
 
-        # ---- UPDATE ELO IF MATCH IS FINISHED ----
+        # ---- UPDATE ELO AND ATTACK/DEFENCE IF MATCH FINISHED ----
         if home_goals is not None and away_goals is not None:
             update_elo(home_id, away_id, home_goals, away_goals)
+            update_attack_defence(home_id, away_id, home_goals, away_goals)
 
 def fetch_football_matches():
     headers = {'X-Auth-Token': Config.FOOTBALL_API_KEY}
