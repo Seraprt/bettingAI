@@ -21,6 +21,13 @@ from .auth import (
 api = Blueprint('api', __name__)
 
 # ------------------------------------------------------------------
+# Global flags for background tasks
+# ------------------------------------------------------------------
+_training_in_progress = False
+_recompute_in_progress = False
+_ingestion_in_progress = False
+
+# ------------------------------------------------------------------
 # Authentication helpers (decorators)
 # ------------------------------------------------------------------
 def require_auth(f):
@@ -96,20 +103,17 @@ def login():
 @api.route('/forgot-password', methods=['POST'])
 def forgot_password():
     data = request.json
-    email = data.get('email')   # now only email
+    email = data.get('email')
     if not email:
         return jsonify({'error': 'Email required'}), 400
     if '@' not in email:
         return jsonify({'error': 'Invalid email address'}), 400
-
-    token, msg = request_password_reset(email)   # we'll update this function to look up by email
+    token, msg = request_password_reset(email)
     if not token:
         return jsonify({'error': msg}), 404
-
     success = send_reset_email(email, token)
     if not success:
         return jsonify({'error': 'Could not send email'}), 500
-
     return jsonify({'message': 'Reset link sent to your email'}), 200
 
 @api.route('/reset-password', methods=['POST'])
@@ -158,7 +162,7 @@ def profile():
         'username': user['username'],
         'email_or_phone': user['email_or_phone'],
         'is_premium': user.get('is_premium', False),
-        'is_admin': user.get('is_admin', False),   # <-- ADD THIS LINE
+        'is_admin': user.get('is_admin', False),
         'subscription_plan': user.get('subscription_plan'),
         'subscription_expiry': user.get('subscription_expiry').isoformat() if user.get('subscription_expiry') else None
     })
@@ -167,7 +171,7 @@ def profile():
 @require_auth
 def subscribe():
     data = request.json
-    plan = data.get('plan')  # '2weeks', '1month', '1year', 'forever'
+    plan = data.get('plan')
     if not plan:
         return jsonify({'error': 'Plan required'}), 400
     msg, err = create_subscription_request(g.user_id, plan)
@@ -289,10 +293,6 @@ def admin_users():
         })
     return jsonify(result)
 
-# Global flags (add near the top)
-_training_in_progress = False
-_recompute_in_progress = False
-
 @api.route('/admin/status', methods=['GET'])
 @require_auth
 @require_admin
@@ -302,6 +302,7 @@ def admin_status():
         'recompute': 'running' if _recompute_in_progress else 'idle',
         'ingestion': 'running' if _ingestion_in_progress else 'idle'
     }), 200
+
 # ------------------------------------------------------------------
 # Prediction endpoints (with access control)
 # ------------------------------------------------------------------
@@ -317,7 +318,6 @@ def today_matches():
     for m in matches:
         home = db.teams.find_one({'_id': m['home_team_id']})
         away = db.teams.find_one({'_id': m['away_team_id']})
-        # Format match time
         match_time = m['date'].strftime('%H:%M') if m.get('date') else 'TBD'
         result.append({
             'id': str(m['_id']),
@@ -369,17 +369,14 @@ def get_prediction(match_id):
         logging.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-
 @api.route('/check-username', methods=['POST'])
 def check_username():
     data = request.json
     username = data.get('username')
     if not username:
         return jsonify({'available': False, 'suggestions': []}), 400
-
     existing = db.users.find_one({'username': username})
     if existing:
-        # Generate up to 5 suggestions by appending numbers
         suggestions = []
         base = username
         i = 1
@@ -388,11 +385,12 @@ def check_username():
             if not db.users.find_one({'username': alt}):
                 suggestions.append(alt)
             i += 1
-            if i > 20:  # safety limit
+            if i > 20:
                 break
         return jsonify({'available': False, 'suggestions': suggestions})
     else:
         return jsonify({'available': True, 'suggestions': []})
+
 @api.route('/best_bets', methods=['GET'])
 @require_auth
 @require_premium
@@ -463,11 +461,9 @@ def best_bets():
         'available_markets': sorted(list(all_markets))
     })
 
-
-
-# Global flag (add near top)
-_recompute_in_progress = False
-
+# ------------------------------------------------------------------
+# Recompute All (background)
+# ------------------------------------------------------------------
 def recompute_all_task():
     global _recompute_in_progress
     logging.info("🔄 Recompute task started.")
@@ -499,9 +495,12 @@ def recompute_all():
     _recompute_in_progress = True
     thread = threading.Thread(target=recompute_all_task, daemon=True)
     thread.start()
-    logging.info("✅ Recompute thread started. Check logs for progress.")  
+    logging.info("✅ Recompute thread started. Check logs for progress.")
     return jsonify({'message': 'Recompute started in background. Check logs for progress.'}), 202
 
+# ------------------------------------------------------------------
+# Sure Bets
+# ------------------------------------------------------------------
 @api.route('/sure_bets', methods=['GET'])
 @require_auth
 @require_premium
@@ -543,7 +542,7 @@ def sure_bets():
     return jsonify(sure_list)
 
 # ------------------------------------------------------------------
-# Administrative / internal endpoints (no auth required – but you can protect them if needed)
+# Administrative / internal endpoints
 # ------------------------------------------------------------------
 @api.route('/update_strength/<team_id>', methods=['POST'])
 def update_strength(team_id):
@@ -570,9 +569,9 @@ def predict_all():
                 logging.error(f"Failed to predict {m['_id']}: {e}")
     return jsonify({'message': f'Predictions computed for {count} matches.'}), 200
 
-
-
-# Flag to prevent multiple training runs
+# ------------------------------------------------------------------
+# Training (background)
+# ------------------------------------------------------------------
 _training_in_progress = False
 
 @api.route('/train', methods=['POST'])
@@ -597,6 +596,40 @@ def trigger_training():
     thread.start()
     return jsonify({'message': 'Training started in background. Check logs for progress.'}), 202
 
+# ------------------------------------------------------------------
+# Ingestion (background with progress logging)
+# ------------------------------------------------------------------
+def ingestion_task():
+    global _ingestion_in_progress
+    from .data_ingestion import fetch_all_football
+    logging.info("🚀 Ingestion started in background.")
+    try:
+        # We need to monkey-patch the fetch_all_football to log progress
+        # But we can just call it and it will print its own logs.
+        # To add more detailed logs, we can wrap it.
+        logging.info("📥 Fetching matches from Football-Data.org (past 120 days + future 14 days)...")
+        fetch_all_football()
+        logging.info("✅ Ingestion completed successfully.")
+    except Exception as e:
+        logging.error(f"❌ Ingestion failed: {e}")
+    finally:
+        _ingestion_in_progress = False
+
+@api.route('/admin/ingest', methods=['POST'])
+@require_auth
+@require_admin
+def admin_ingest():
+    global _ingestion_in_progress
+    if _ingestion_in_progress:
+        return jsonify({'message': 'Ingestion already in progress.'}), 409
+    _ingestion_in_progress = True
+    thread = threading.Thread(target=ingestion_task, daemon=True)
+    thread.start()
+    return jsonify({'message': 'Ingestion started in background. Check logs for progress.'}), 202
+
+# ------------------------------------------------------------------
+# Other endpoints (available_markets, debug, health, etc.)
+# ------------------------------------------------------------------
 @api.route('/available_markets', methods=['GET'])
 def available_markets():
     markets = [
@@ -697,32 +730,7 @@ def ingest():
     from .data_ingestion import fetch_all_football
     fetch_all_football()
     return jsonify({'message': 'Ingestion triggered.'}), 200
-# Global flag for ingestion
-_ingestion_in_progress = False
 
-def ingestion_task():
-    global _ingestion_in_progress
-    from .data_ingestion import fetch_all_football
-    logging.info("🚀 Ingestion started in background.")
-    try:
-        fetch_all_football()
-        logging.info("✅ Ingestion completed successfully.")
-    except Exception as e:
-        logging.error(f"❌ Ingestion failed: {e}")
-    finally:
-        _ingestion_in_progress = False
-
-@api.route('/admin/ingest', methods=['POST'])
-@require_auth
-@require_admin
-def admin_ingest():
-    global _ingestion_in_progress
-    if _ingestion_in_progress:
-        return jsonify({'message': 'Ingestion already in progress.'}), 409
-    _ingestion_in_progress = True
-    thread = threading.Thread(target=ingestion_task, daemon=True)
-    thread.start()
-    return jsonify({'message': 'Ingestion started in background. Check logs for progress.'}), 202
 @api.route('/prediction_accuracy', methods=['GET'])
 def prediction_accuracy():
     predictions = list(db.predictions.find({'actual_outcome': {'$ne': None}}))
@@ -739,5 +747,3 @@ def prediction_accuracy():
         'accuracy': round(correct / total * 100, 2) if total > 0 else 0,
         'pending': pending
     })
-
-
