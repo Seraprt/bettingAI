@@ -589,12 +589,6 @@ def get_safe_markets(match_doc):
 # 11. Sure bets (ONE per match + secondary pick)
 # ------------------------------------------------------------------
 def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
-    # Define the secondary market list
-    secondary_candidates = [
-        'home_win', '12', 'away_win', '1X', 'X2',
-        'any_team_over_2.5_goals', 'any_team_under_2.5_goals'
-    ]
-
     sure_list = []
     processed = 0
     for match in matches:
@@ -637,12 +631,44 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
         if best_market and best_prob >= min_prob:
             correct_score = get_most_likely_score(h_xg, a_xg)
 
-            # ---- Select secondary market ----
+            # ---- Select secondary market (avoid contradiction with likely result) ----
             secondary_market = None
             secondary_prob = None
-            # Build a list of candidate scores (market, score) excluding the primary and any that are invalid
+
+            # Determine most likely result (home, draw, away)
+            home_prob = probs.get('home_win', 0)
+            draw_prob = probs.get('draw', 0)
+            away_prob = probs.get('away_win', 0)
+            max_prob = max(home_prob, draw_prob, away_prob)
+            if max_prob == home_prob:
+                likely_result = 'home'
+            elif max_prob == draw_prob:
+                likely_result = 'draw'
+            else:
+                likely_result = 'away'
+
+            # Candidate list with their internal and display names
+            secondary_candidates = [
+                ('home_win', 'home_win'),
+                ('12', 'home or away'),
+                ('away_win', 'away_win'),
+                ('1X', 'home or draw'),
+                ('X2', 'draw or away'),
+                ('any_team_over_2.5_goals', 'Over 2.5 goals'),
+                ('any_team_under_2.5_goals', 'Under 2.5 goals')
+            ]
+
+            # Remove those that contradict the likely result
+            if likely_result == 'home':
+                secondary_candidates = [c for c in secondary_candidates if c[0] not in ['X2']]
+            elif likely_result == 'away':
+                secondary_candidates = [c for c in secondary_candidates if c[0] not in ['1X']]
+            elif likely_result == 'draw':
+                secondary_candidates = [c for c in secondary_candidates if c[0] not in ['12']]
+
+            # Build candidates with scores, excluding the primary market
             candidates = []
-            for mkt in secondary_candidates:
+            for mkt, _ in secondary_candidates:
                 if mkt == best_market:
                     continue
                 prob = probs.get(mkt)
@@ -653,8 +679,8 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
                     continue
                 score = prob * confidence
                 candidates.append((score, mkt, prob))
+
             if candidates:
-                # Sort by score descending and pick the best
                 candidates.sort(reverse=True, key=lambda x: x[0])
                 secondary_market = candidates[0][1]
                 secondary_prob = candidates[0][2]
@@ -664,6 +690,7 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
                 home_name, away_name, correct_score,
                 secondary_market, secondary_prob
             )
+
             sure_list.append({
                 'match': f"{home_name} vs {away_name}",
                 'tournament': match.get('tournament'),
@@ -676,15 +703,13 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
                 'time_remaining': get_time_remaining(match['date']),
                 'correct_score': correct_score
             })
+
         processed += 1
         if processed >= max_matches:
             break
 
     sure_list.sort(key=lambda x: x['score'], reverse=True)
-    return sure_list[:20]
-
-
-# ------------------------------------------------------------------
+    return sure_list[:20]# ------------------------------------------------------------------
 # 12. Time remaining helper
 # ------------------------------------------------------------------
 def get_time_remaining(match_date):
@@ -700,3 +725,94 @@ def get_time_remaining(match_date):
         hours = int(diff.total_seconds() // 3600)
         mins = int((diff.total_seconds() % 3600) // 60)
         return f"⏳ {hours}h {mins}m"
+    
+    # ------------------------------------------------------------------
+# Market Groups (for the Market Page)
+# ------------------------------------------------------------------
+def get_market_groups(matches):
+    groups = {
+        'gg': {'name': 'Both Teams to Score (GG)', 'bets': []},
+        '1x2': {'name': '1X2 (Highest Probability)', 'bets': []},
+        'dc_under': {'name': 'Double Chance + Under 3.5', 'bets': []},
+        'dc_gg': {'name': 'Double Chance + GG', 'bets': []}
+    }
+
+    for match in matches:
+        if match.get('home_win_prob') is None:
+            continue
+        h_xg = match.get('home_xg', 1.2)
+        a_xg = match.get('away_xg', 1.0)
+        probs = compute_all_market_probs(h_xg, a_xg)
+        context = match.get('context', {})
+        home = db.teams.find_one({'_id': match['home_team_id']})
+        away = db.teams.find_one({'_id': match['away_team_id']})
+        home_name = home['name'] if home else 'Unknown'
+        away_name = away['name'] if away else 'Unknown'
+
+        confidence = match.get('confidence', 0.5)
+        match_label = f"{home_name} vs {away_name}"
+
+        # 1. GG (Both Teams to Score)
+        gg_prob = probs.get('btts_yes', 0)
+        gg_score = gg_prob * confidence
+        groups['gg']['bets'].append({
+            'match': match_label,
+            'market': 'Both Teams to Score (Yes)',
+            'probability': gg_prob,
+            'confidence': confidence,
+            'score': gg_score,
+            'match_id': str(match['_id'])
+        })
+
+        # 2. 1X2 – pick the highest probability among home_win, draw, away_win
+        home_win = probs.get('home_win', 0)
+        draw = probs.get('draw', 0)
+        away_win = probs.get('away_win', 0)
+        best_market = 'home_win' if home_win >= draw and home_win >= away_win else ('draw' if draw >= away_win else 'away_win')
+        best_prob = max(home_win, draw, away_win)
+        best_score = best_prob * confidence
+        groups['1x2']['bets'].append({
+            'match': match_label,
+            'market': best_market.replace('_', ' ').title(),
+            'probability': best_prob,
+            'confidence': confidence,
+            'score': best_score,
+            'match_id': str(match['_id'])
+        })
+
+        # 3. Double Chance + Under 3.5
+        # Calculate double chance (1X or X2) – choose the higher one
+        dc_1x = probs.get('1X', 0)  # home win or draw
+        dc_x2 = probs.get('X2', 0)  # draw or away win
+        best_dc = max(dc_1x, dc_x2)
+        best_dc_label = '1X' if dc_1x >= dc_x2 else 'X2'
+        under_3_5 = probs.get('under_3.5', 0)
+        combined_prob = best_dc * under_3_5
+        combined_score = combined_prob * confidence
+        groups['dc_under']['bets'].append({
+            'match': match_label,
+            'market': f'{best_dc_label} + Under 3.5',
+            'probability': combined_prob,
+            'confidence': confidence,
+            'score': combined_score,
+            'match_id': str(match['_id'])
+        })
+
+        # 4. Double Chance + GG
+        gg_prob = probs.get('btts_yes', 0)
+        combined_gg_prob = best_dc * gg_prob
+        combined_gg_score = combined_gg_prob * confidence
+        groups['dc_gg']['bets'].append({
+            'match': match_label,
+            'market': f'{best_dc_label} + GG',
+            'probability': combined_gg_prob,
+            'confidence': confidence,
+            'score': combined_gg_score,
+            'match_id': str(match['_id'])
+        })
+
+    # For each group, sort by score descending and take top 4
+    for key in groups:
+        groups[key]['bets'] = sorted(groups[key]['bets'], key=lambda x: x['score'], reverse=True)[:4]
+
+    return groups

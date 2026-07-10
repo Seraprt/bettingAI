@@ -747,3 +747,75 @@ def prediction_accuracy():
         'accuracy': round(correct / total * 100, 2) if total > 0 else 0,
         'pending': pending
     })
+
+    # ------------------------------------------------------------------
+# Market Groups (4 groups, top 4 matches each)
+# ------------------------------------------------------------------
+@api.route('/market_bets', methods=['GET'])
+@require_auth
+@require_premium
+def market_bets():
+    days_ahead = int(request.args.get('days_ahead', 14))
+    now = datetime.utcnow()
+    future = now + timedelta(days=days_ahead)
+    matches = list(db.matches.find({'date': {'$gte': now, '$lte': future}}))
+
+    if not matches:
+        return jsonify({'message': 'No upcoming matches found.'}), 200
+
+    # Ensure predictions exist
+    for m in matches:
+        if m.get('home_win_prob') is None:
+            try:
+                predict(m)
+            except Exception as e:
+                logging.error(f"Prediction failed for {m['_id']}: {e}")
+
+    # We'll compute groups using a helper from prediction_engine
+    from .prediction_engine import get_market_groups
+    groups = get_market_groups(matches)
+    return jsonify(groups)
+
+# ------------------------------------------------------------------
+# Prediction Accuracy Details
+# ------------------------------------------------------------------
+@api.route('/prediction_accuracy_details', methods=['GET'])
+@require_auth
+@require_admin
+def prediction_accuracy_details():
+    # Get all matches that have predictions and actual results
+    matches = list(db.matches.find({
+        'home_goals': {'$ne': None},
+        'away_goals': {'$ne': None},
+        'home_win_prob': {'$ne': None}
+    }).sort('date', -1).limit(100))  # limit to last 100
+
+    results = []
+    for m in matches:
+        home = db.teams.find_one({'_id': m['home_team_id']})
+        away = db.teams.find_one({'_id': m['away_team_id']})
+        home_name = home['name'] if home else 'Unknown'
+        away_name = away['name'] if away else 'Unknown'
+
+        # Get predicted winner
+        home_prob = m.get('home_win_prob', 0)
+        draw_prob = m.get('draw_prob', 0)
+        away_prob = m.get('away_win_prob', 0)
+        predicted = 'home' if home_prob > draw_prob and home_prob > away_prob else ('away' if away_prob > draw_prob else 'draw')
+
+        actual = 'home' if m['home_goals'] > m['away_goals'] else ('away' if m['away_goals'] > m['home_goals'] else 'draw')
+        correct = predicted == actual
+
+        results.append({
+            'match': f"{home_name} vs {away_name}",
+            'tournament': m.get('tournament'),
+            'date': m['date'].isoformat(),
+            'predicted': predicted,
+            'actual': actual,
+            'correct': correct,
+            'home_xg': m.get('home_xg'),
+            'away_xg': m.get('away_xg'),
+            'confidence': m.get('confidence')
+        })
+
+    return jsonify(results)
