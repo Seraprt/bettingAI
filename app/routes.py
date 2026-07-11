@@ -5,7 +5,7 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 import logging
 import traceback
-from init_ratings import init_ratings
+from .init_ratings import compute_ratings_from_all_matches
 from functools import wraps
 from .prediction_engine import (
     predict, get_best_market, get_sure_bets, get_safe_markets, get_time_remaining,
