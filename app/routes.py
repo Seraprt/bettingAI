@@ -8,7 +8,7 @@ import traceback
 from functools import wraps
 from .prediction_engine import (
     predict, get_best_market, get_sure_bets, get_safe_markets, get_time_remaining,
-    compute_all_market_probs
+    compute_all_market_probs, get_market_groups, get_draw_probability, get_factor_predictions
 )
 from .auth import (
     register_user, login_user, is_premium, is_admin, get_user_by_id,
@@ -542,6 +542,247 @@ def sure_bets():
     return jsonify(sure_list)
 
 # ------------------------------------------------------------------
+# Market Page (groups: GG, 1X2, DC+Under, DC+GG, Draw)
+# ------------------------------------------------------------------
+@api.route('/market_bets', methods=['GET'])
+@require_auth
+@require_premium
+def market_bets():
+    days_ahead = int(request.args.get('days_ahead', 14))
+    now = datetime.utcnow()
+    future = now + timedelta(days=days_ahead)
+    matches = list(db.matches.find({'date': {'$gte': now, '$lte': future}}))
+
+    if not matches:
+        return jsonify({'message': 'No upcoming matches found.'}), 200
+
+    # Ensure predictions exist
+    for m in matches:
+        if m.get('home_win_prob') is None:
+            try:
+                predict(m)
+            except Exception as e:
+                logging.error(f"Prediction failed for {m['_id']}: {e}")
+
+    groups = get_market_groups(matches)
+
+    # Add Draw group (using factor-based draw probability)
+    draw_group = {'name': 'Draw (Most Likely)', 'bets': []}
+    for match in matches:
+        if match.get('home_win_prob') is None:
+            continue
+        draw_prob = match.get('draw_prob', 0)
+        confidence = match.get('confidence', 0.5)
+        home = db.teams.find_one({'_id': match['home_team_id']})
+        away = db.teams.find_one({'_id': match['away_team_id']})
+        home_name = home['name'] if home else 'Unknown'
+        away_name = away['name'] if away else 'Unknown'
+        match_label = f"{home_name} vs {away_name}"
+        score = draw_prob * confidence
+        draw_group['bets'].append({
+            'match': match_label,
+            'market': 'Draw',
+            'probability': draw_prob,
+            'confidence': confidence,
+            'score': score,
+            'match_id': str(match['_id'])
+        })
+    draw_group['bets'] = sorted(draw_group['bets'], key=lambda x: x['score'], reverse=True)[:4]
+    groups['draw'] = draw_group
+
+    return jsonify(groups)
+
+# ------------------------------------------------------------------
+# Prediction Accuracy Details (all predictions, grouped by market type)
+# ------------------------------------------------------------------
+@api.route('/prediction_accuracy_details', methods=['GET'])
+@require_auth
+@require_admin
+def prediction_accuracy_details():
+    # Fetch all predictions that have actual_outcome set
+    predictions = list(db.predictions.find({'actual_outcome': {'$ne': None}}))
+    results = []
+    correct_score_results = []
+    other_results = []
+
+    for pred in predictions:
+        # Determine if it's a correct score prediction
+        is_correct_score = pred.get('market', '').startswith('correct_')
+        entry = {
+            'match': f"{pred.get('home_team', 'Unknown')} vs {pred.get('away_team', 'Unknown')}",
+            'tournament': pred.get('tournament'),
+            'market': pred.get('market'),
+            'probability': pred.get('probability'),
+            'confidence': pred.get('confidence'),
+            'predicted_at': pred.get('predicted_at').isoformat() if pred.get('predicted_at') else None,
+            'actual_outcome': pred.get('actual_outcome'),
+            'was_correct': pred.get('actual_outcome') == 'won'
+        }
+        if is_correct_score:
+            correct_score_results.append(entry)
+        else:
+            other_results.append(entry)
+
+    # Compute accuracy percentages
+    def compute_stats(items):
+        total = len(items)
+        correct = sum(1 for i in items if i['was_correct'])
+        accuracy = round(correct / total * 100, 2) if total > 0 else 0
+        return {
+            'total': total,
+            'correct': correct,
+            'accuracy': accuracy,
+            'items': items
+        }
+
+    return jsonify({
+        'correct_score': compute_stats(correct_score_results),
+        'other_markets': compute_stats(other_results),
+        'all': compute_stats(correct_score_results + other_results)
+    })
+
+# ------------------------------------------------------------------
+# Factors Page (admin only) – shows factor-based predictions with stakes
+# ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Factors Page (admin only) – shows factor-based predictions for all market groups
+# ------------------------------------------------------------------
+@api.route('/factors_predictions', methods=['GET'])
+@require_auth
+@require_admin
+def factors_predictions():
+    from .prediction_engine import (
+        compute_all_market_probs, get_most_likely_score, kelly_fraction, poisson
+    )
+    days_ahead = int(request.args.get('days_ahead', 14))
+    now = datetime.utcnow()
+    future = now + timedelta(days=days_ahead)
+    matches = list(db.matches.find({'date': {'$gte': now, '$lte': future}}))
+
+    if not matches:
+        return jsonify({'message': 'No upcoming matches found.'}), 200
+
+    # Ensure predictions exist
+    for m in matches:
+        if m.get('home_win_prob') is None:
+            try:
+                predict(m)
+            except Exception as e:
+                logging.error(f"Prediction failed for {m['_id']}: {e}")
+
+    # Define groups (same as market page + correct_score)
+    groups = {
+        'gg': {'name': 'Both Teams to Score (GG)', 'bets': []},
+        '1x2': {'name': '1X2 (Highest Probability)', 'bets': []},
+        'dc_under': {'name': 'Double Chance + Under 3.5', 'bets': []},
+        'dc_gg': {'name': 'Double Chance + GG', 'bets': []},
+        'correct_score': {'name': 'Correct Score (Most Likely)', 'bets': []}
+    }
+
+    for match in matches:
+        if match.get('home_win_prob') is None:
+            continue
+        h_xg = match.get('home_xg', 1.2)
+        a_xg = match.get('away_xg', 1.0)
+        probs = compute_all_market_probs(h_xg, a_xg)
+        confidence = match.get('confidence', 0.5)
+
+        home = db.teams.find_one({'_id': match['home_team_id']})
+        away = db.teams.find_one({'_id': match['away_team_id']})
+        home_name = home['name'] if home else 'Unknown'
+        away_name = away['name'] if away else 'Unknown'
+        match_label = f"{home_name} vs {away_name}"
+        home_factors = match.get('home_factors', {})
+        away_factors = match.get('away_factors', {})
+
+        # 1. GG (Both Teams to Score)
+        gg_prob = probs.get('btts_yes', 0)
+        groups['gg']['bets'].append({
+            'match': match_label,
+            'market': 'Both Teams to Score (Yes)',
+            'probability': gg_prob,
+            'confidence': confidence,
+            'score': gg_prob * confidence,
+            'match_id': str(match['_id']),
+            'home_factors': home_factors,
+            'away_factors': away_factors
+        })
+
+        # 2. 1X2 – pick highest probability outcome
+        home_win = probs.get('home_win', 0)
+        draw = probs.get('draw', 0)
+        away_win = probs.get('away_win', 0)
+        best_market = 'home_win' if home_win >= draw and home_win >= away_win else ('draw' if draw >= away_win else 'away_win')
+        best_prob = max(home_win, draw, away_win)
+        groups['1x2']['bets'].append({
+            'match': match_label,
+            'market': best_market.replace('_', ' ').title(),
+            'probability': best_prob,
+            'confidence': confidence,
+            'score': best_prob * confidence,
+            'match_id': str(match['_id']),
+            'home_factors': home_factors,
+            'away_factors': away_factors,
+            # Kelly stakes for 1X2 (assuming odds = 2.0)
+            'home_stake': kelly_fraction(home_win, 2.0),
+            'draw_stake': kelly_fraction(draw, 2.0),
+            'away_stake': kelly_fraction(away_win, 2.0)
+        })
+
+        # 3. Double Chance + Under 3.5
+        dc_1x = probs.get('1X', 0)
+        dc_x2 = probs.get('X2', 0)
+        best_dc = max(dc_1x, dc_x2)
+        best_dc_label = '1X' if dc_1x >= dc_x2 else 'X2'
+        under_3_5 = probs.get('under_3.5', 0)
+        combined_prob = best_dc * under_3_5
+        groups['dc_under']['bets'].append({
+            'match': match_label,
+            'market': f'{best_dc_label} + Under 3.5',
+            'probability': combined_prob,
+            'confidence': confidence,
+            'score': combined_prob * confidence,
+            'match_id': str(match['_id']),
+            'home_factors': home_factors,
+            'away_factors': away_factors
+        })
+
+        # 4. Double Chance + GG
+        gg_prob = probs.get('btts_yes', 0)
+        combined_gg_prob = best_dc * gg_prob
+        groups['dc_gg']['bets'].append({
+            'match': match_label,
+            'market': f'{best_dc_label} + GG',
+            'probability': combined_gg_prob,
+            'confidence': confidence,
+            'score': combined_gg_prob * confidence,
+            'match_id': str(match['_id']),
+            'home_factors': home_factors,
+            'away_factors': away_factors
+        })
+
+        # 5. Correct Score – most likely scoreline and its probability
+        correct_score = get_most_likely_score(h_xg, a_xg)
+        # Compute probability of that exact score
+        h, a = map(int, correct_score.split('-'))
+        score_prob = poisson.pmf(h, h_xg) * poisson.pmf(a, a_xg)
+        groups['correct_score']['bets'].append({
+            'match': match_label,
+            'market': f'Correct Score {correct_score}',
+            'probability': score_prob,
+            'confidence': confidence,
+            'score': score_prob * confidence,
+            'match_id': str(match['_id']),
+            'home_factors': home_factors,
+            'away_factors': away_factors
+        })
+
+    # Sort and keep top 4 per group
+    for key in groups:
+        groups[key]['bets'] = sorted(groups[key]['bets'], key=lambda x: x['score'], reverse=True)[:4]
+
+    return jsonify(groups)
+# ------------------------------------------------------------------
 # Administrative / internal endpoints
 # ------------------------------------------------------------------
 @api.route('/update_strength/<team_id>', methods=['POST'])
@@ -572,8 +813,6 @@ def predict_all():
 # ------------------------------------------------------------------
 # Training (background)
 # ------------------------------------------------------------------
-_training_in_progress = False
-
 @api.route('/train', methods=['POST'])
 def trigger_training():
     global _training_in_progress
@@ -604,9 +843,6 @@ def ingestion_task():
     from .data_ingestion import fetch_all_football
     logging.info("🚀 Ingestion started in background.")
     try:
-        # We need to monkey-patch the fetch_all_football to log progress
-        # But we can just call it and it will print its own logs.
-        # To add more detailed logs, we can wrap it.
         logging.info("📥 Fetching matches from Football-Data.org (past 120 days + future 14 days)...")
         fetch_all_football()
         logging.info("✅ Ingestion completed successfully.")
@@ -747,75 +983,3 @@ def prediction_accuracy():
         'accuracy': round(correct / total * 100, 2) if total > 0 else 0,
         'pending': pending
     })
-
-    # ------------------------------------------------------------------
-# Market Groups (4 groups, top 4 matches each)
-# ------------------------------------------------------------------
-@api.route('/market_bets', methods=['GET'])
-@require_auth
-@require_premium
-def market_bets():
-    days_ahead = int(request.args.get('days_ahead', 14))
-    now = datetime.utcnow()
-    future = now + timedelta(days=days_ahead)
-    matches = list(db.matches.find({'date': {'$gte': now, '$lte': future}}))
-
-    if not matches:
-        return jsonify({'message': 'No upcoming matches found.'}), 200
-
-    # Ensure predictions exist
-    for m in matches:
-        if m.get('home_win_prob') is None:
-            try:
-                predict(m)
-            except Exception as e:
-                logging.error(f"Prediction failed for {m['_id']}: {e}")
-
-    # We'll compute groups using a helper from prediction_engine
-    from .prediction_engine import get_market_groups
-    groups = get_market_groups(matches)
-    return jsonify(groups)
-
-# ------------------------------------------------------------------
-# Prediction Accuracy Details
-# ------------------------------------------------------------------
-@api.route('/prediction_accuracy_details', methods=['GET'])
-@require_auth
-@require_admin
-def prediction_accuracy_details():
-    # Get all matches that have predictions and actual results
-    matches = list(db.matches.find({
-        'home_goals': {'$ne': None},
-        'away_goals': {'$ne': None},
-        'home_win_prob': {'$ne': None}
-    }).sort('date', -1).limit(100))  # limit to last 100
-
-    results = []
-    for m in matches:
-        home = db.teams.find_one({'_id': m['home_team_id']})
-        away = db.teams.find_one({'_id': m['away_team_id']})
-        home_name = home['name'] if home else 'Unknown'
-        away_name = away['name'] if away else 'Unknown'
-
-        # Get predicted winner
-        home_prob = m.get('home_win_prob', 0)
-        draw_prob = m.get('draw_prob', 0)
-        away_prob = m.get('away_win_prob', 0)
-        predicted = 'home' if home_prob > draw_prob and home_prob > away_prob else ('away' if away_prob > draw_prob else 'draw')
-
-        actual = 'home' if m['home_goals'] > m['away_goals'] else ('away' if m['away_goals'] > m['home_goals'] else 'draw')
-        correct = predicted == actual
-
-        results.append({
-            'match': f"{home_name} vs {away_name}",
-            'tournament': m.get('tournament'),
-            'date': m['date'].isoformat(),
-            'predicted': predicted,
-            'actual': actual,
-            'correct': correct,
-            'home_xg': m.get('home_xg'),
-            'away_xg': m.get('away_xg'),
-            'confidence': m.get('confidence')
-        })
-
-    return jsonify(results)
