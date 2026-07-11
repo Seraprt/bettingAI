@@ -644,53 +644,72 @@ def market_bets():
 # ------------------------------------------------------------------
 # Prediction Accuracy Details (all predictions, grouped by market type)
 # ------------------------------------------------------------------
+ # add this at the top if not already imported
+
 @api.route('/prediction_accuracy_details', methods=['GET'])
 @require_auth
 @require_admin
 def prediction_accuracy_details():
-    # Fetch all predictions that have actual_outcome set (won/lost)
-    resolved = list(db.predictions.find({'actual_outcome': {'$in': ['won', 'lost']}}))
-    pending = db.predictions.count_documents({'actual_outcome': None})
-    total_resolved = len(resolved)
-    correct = sum(1 for p in resolved if p.get('actual_outcome') == 'won')
-    accuracy = round(correct / total_resolved * 100, 2) if total_resolved > 0 else 0
+    try:
+        # Fetch all predictions that have actual_outcome set (won/lost)
+        resolved = list(db.predictions.find({'actual_outcome': {'$in': ['won', 'lost']}}))
+        pending = db.predictions.count_documents({'actual_outcome': None})
+        total_resolved = len(resolved)
+        correct = sum(1 for p in resolved if p.get('actual_outcome') == 'won')
+        accuracy = round(correct / total_resolved * 100, 2) if total_resolved > 0 else 0
 
-    # Group by correct score vs other markets
-    correct_score_results = []
-    other_results = []
-    for pred in resolved:
-        is_correct_score = pred.get('market', '').startswith('correct_')
-        entry = {
-            'match': f"{pred.get('home_team', 'Unknown')} vs {pred.get('away_team', 'Unknown')}",
-            'tournament': pred.get('tournament'),
-            'market': pred.get('market'),
-            'probability': pred.get('probability'),
-            'confidence': pred.get('confidence'),
-            'predicted_at': pred.get('predicted_at').isoformat() if pred.get('predicted_at') else None,
-            'actual_outcome': pred.get('actual_outcome'),
-            'was_correct': pred.get('actual_outcome') == 'won'
-        }
-        if is_correct_score:
-            correct_score_results.append(entry)
-        else:
-            other_results.append(entry)
+        correct_score_results = []
+        other_results = []
+        for pred in resolved:
+            # Get team names from the stored IDs
+            home_team_id = pred.get('home_team')
+            away_team_id = pred.get('away_team')
+            home_name = 'Unknown'
+            away_name = 'Unknown'
+            if home_team_id:
+                home = db.teams.find_one({'_id': ObjectId(home_team_id)})
+                if home:
+                    home_name = home.get('name', 'Unknown')
+            if away_team_id:
+                away = db.teams.find_one({'_id': ObjectId(away_team_id)})
+                if away:
+                    away_name = away.get('name', 'Unknown')
 
-    def compute_stats(items):
-        total = len(items)
-        correct = sum(1 for i in items if i['was_correct'])
-        acc = round(correct / total * 100, 2) if total > 0 else 0
-        return {'total': total, 'correct': correct, 'accuracy': acc, 'items': items}
+            is_correct_score = pred.get('market', '').startswith('correct_')
+            entry = {
+                'match': f"{home_name} vs {away_name}",
+                'tournament': pred.get('tournament'),
+                'market': pred.get('market'),
+                'probability': pred.get('probability'),
+                'confidence': pred.get('confidence'),
+                'predicted_at': pred.get('predicted_at').isoformat() if pred.get('predicted_at') else None,
+                'actual_outcome': pred.get('actual_outcome'),
+                'was_correct': pred.get('actual_outcome') == 'won'
+            }
+            if is_correct_score:
+                correct_score_results.append(entry)
+            else:
+                other_results.append(entry)
 
-    return jsonify({
-        'total_resolved': total_resolved,
-        'correct': correct,
-        'accuracy': accuracy,
-        'pending': pending,
-        'correct_score': compute_stats(correct_score_results),
-        'other_markets': compute_stats(other_results),
-        'all': compute_stats(resolved)
-    })
-# ------------------------------------------------------------------
+        def compute_stats(items):
+            total = len(items)
+            correct = sum(1 for i in items if i['was_correct'])
+            acc = round(correct / total * 100, 2) if total > 0 else 0
+            return {'total': total, 'correct': correct, 'accuracy': acc, 'items': items}
+
+        return jsonify({
+            'total_resolved': total_resolved,
+            'correct': correct,
+            'accuracy': accuracy,
+            'pending': pending,
+            'correct_score': compute_stats(correct_score_results),
+            'other_markets': compute_stats(other_results),
+            'all': compute_stats(resolved)
+        })
+    except Exception as e:
+        logging.error(f"Error in prediction_accuracy_details: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500# ------------------------------------------------------------------
 # Factors Page (admin only) – shows factor-based predictions for all market groups
 # ------------------------------------------------------------------
 @api.route('/factors_predictions', methods=['GET'])
