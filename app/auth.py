@@ -190,7 +190,7 @@ def send_reset_email(email, token):
         logging.error("BREVO_API_KEY not set – email not sent.")
         return False
 
-    reset_link = f"https://xtech-bet.onrender.com/reset-password?token={token}"
+    reset_link = f"https://xtech-bet-exyq.onrender.com/reset-password?token={token}"
     url = "https://api.brevo.com/v3/smtp/email"
     headers = {
         "api-key": api_key,

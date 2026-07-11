@@ -5,6 +5,7 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 import logging
 import traceback
+from init_ratings import init_ratings
 from functools import wraps
 from .prediction_engine import (
     predict, get_best_market, get_sure_bets, get_safe_markets, get_time_remaining,
@@ -292,7 +293,6 @@ def admin_users():
             'created_at': u['created_at'].isoformat()
         })
     return jsonify(result)
-
 @api.route('/admin/status', methods=['GET'])
 @require_auth
 @require_admin
@@ -300,7 +300,8 @@ def admin_status():
     return jsonify({
         'training': 'running' if _training_in_progress else 'idle',
         'recompute': 'running' if _recompute_in_progress else 'idle',
-        'ingestion': 'running' if _ingestion_in_progress else 'idle'
+        'ingestion': 'running' if _ingestion_in_progress else 'idle',
+        'init_ratings': 'running' if _init_ratings_in_progress else 'idle'
     }), 200
 
 # ------------------------------------------------------------------
@@ -983,3 +984,97 @@ def prediction_accuracy():
         'accuracy': round(correct / total * 100, 2) if total > 0 else 0,
         'pending': pending
     })
+
+@api.route('/admin/learning_insights', methods=['GET'])
+@require_auth
+@require_admin
+def learning_insights():
+    """
+    Returns statistics about how much data the system has collected per team,
+    and an overall learning score (0-1) indicating data quality.
+    """
+    teams = list(db.teams.find({}))
+    team_data = []
+    total_matches = 0
+    min_matches = float('inf')
+    max_matches = 0
+
+    for team in teams:
+        team_id = team['_id']
+        # Count finished matches where this team played (home or away)
+        count = db.matches.count_documents({
+            '$or': [
+                {'home_team_id': team_id, 'home_goals': {'$ne': None}},
+                {'away_team_id': team_id, 'away_goals': {'$ne': None}}
+            ]
+        })
+        total_matches += count
+        if count < min_matches:
+            min_matches = count
+        if count > max_matches:
+            max_matches = count
+        team_data.append({
+            'name': team.get('name', 'Unknown'),
+            'matches': count,
+            'attack_rating': team.get('attack_rating', 1.0),
+            'defence_rating': team.get('defence_rating', 1.0),
+            'elo_rating': team.get('elo_rating', 1500)
+        })
+
+    # Sort by matches descending for display
+    team_data_sorted = sorted(team_data, key=lambda x: x['matches'], reverse=True)
+
+    total_teams = len(teams)
+    teams_with_data = sum(1 for t in team_data if t['matches'] > 0)
+    teams_insufficient = sum(1 for t in team_data if t['matches'] < 5)  # threshold
+    avg_matches = total_matches / total_teams if total_teams > 0 else 0
+
+    # Compute a learning score (0-1) based on:
+    # - % of teams with >=10 matches (weight 0.5)
+    # - average matches / 50 (capped at 1) (weight 0.3)
+    # - % of teams with attack/defence rating not exactly 1.0 (weight 0.2)
+    pct_teams_with_10 = sum(1 for t in team_data if t['matches'] >= 10) / total_teams if total_teams > 0 else 0
+    avg_match_score = min(1.0, avg_matches / 50)  # 50 matches is considered good
+    # Ratings diversity: fraction of teams whose attack_rating is not 1.0 (within tolerance)
+    ratings_diverse = sum(1 for t in team_data if abs(t['attack_rating'] - 1.0) > 0.05 or abs(t['defence_rating'] - 1.0) > 0.05) / total_teams if total_teams > 0 else 0
+
+    learning_score = (pct_teams_with_10 * 0.5) + (avg_match_score * 0.3) + (ratings_diverse * 0.2)
+    learning_score = round(min(1.0, learning_score), 3)
+
+    return jsonify({
+        'total_teams': total_teams,
+        'teams_with_data': teams_with_data,
+        'teams_insufficient': teams_insufficient,
+        'avg_matches_per_team': round(avg_matches, 2),
+        'min_matches': min_matches if min_matches != float('inf') else 0,
+        'max_matches': max_matches,
+        'learning_score': learning_score,
+        'top_teams': team_data_sorted[:20]  # top 20 by matches
+    }), 200
+
+    # Global flag for init_ratings
+_init_ratings_in_progress = False
+
+@api.route('/admin/init_ratings', methods=['POST'])
+@require_auth
+@require_admin
+def admin_init_ratings():
+    global _init_ratings_in_progress
+    if _init_ratings_in_progress:
+        return jsonify({'message': 'Initialisation already in progress.'}), 409
+
+    from .init_ratings import compute_ratings_from_all_matches
+
+    def init_task():
+        global _init_ratings_in_progress
+        try:
+            compute_ratings_from_all_matches()
+        except Exception as e:
+            logging.error(f"Init ratings failed: {e}")
+        finally:
+            _init_ratings_in_progress = False
+
+    _init_ratings_in_progress = True
+    thread = threading.Thread(target=init_task, daemon=True)
+    thread.start()
+    return jsonify({'message': 'Initialisation started in background. Check logs for progress.'}), 202
