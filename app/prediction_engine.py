@@ -800,3 +800,8 @@ def get_market_groups(matches):
         groups[key]['bets'] = sorted(groups[key]['bets'], key=lambda x: x['score'], reverse=True)[:4]
 
     return groups
+
+# ------------------------------------------------------------------
+# Export poisson for use in routes.py
+# ------------------------------------------------------------------
+poisson = poisson

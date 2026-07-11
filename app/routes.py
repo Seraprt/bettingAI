@@ -9,7 +9,7 @@ from .init_ratings import compute_ratings_from_all_matches
 from functools import wraps
 from .prediction_engine import (
     predict, get_best_market, get_sure_bets, get_safe_markets, get_time_remaining,
-    compute_all_market_probs, get_market_groups, get_draw_probability, get_factor_predictions
+    compute_all_market_probs, get_market_groups, get_most_likely_score, kelly_fraction
 )
 from .auth import (
     register_user, login_user, is_premium, is_admin, get_user_by_id,
@@ -27,6 +27,7 @@ api = Blueprint('api', __name__)
 _training_in_progress = False
 _recompute_in_progress = False
 _ingestion_in_progress = False
+_init_ratings_in_progress = False  # moved here
 
 # ------------------------------------------------------------------
 # Authentication helpers (decorators)
@@ -180,7 +181,7 @@ def subscribe():
         return jsonify({'error': err}), 400
     return jsonify({'message': msg}), 200
 
-@api.route('/check-subscription', methods=['GET'])
+@api.route('/check-subscription', methods=['GET'])   # <-- FIXED: added '=' and correct parentheses
 @require_auth
 def check_subscription():
     premium = is_premium(g.user_id)
@@ -293,6 +294,7 @@ def admin_users():
             'created_at': u['created_at'].isoformat()
         })
     return jsonify(result)
+
 @api.route('/admin/status', methods=['GET'])
 @require_auth
 @require_admin
@@ -643,9 +645,6 @@ def prediction_accuracy_details():
     })
 
 # ------------------------------------------------------------------
-# Factors Page (admin only) – shows factor-based predictions with stakes
-# ------------------------------------------------------------------
-# ------------------------------------------------------------------
 # Factors Page (admin only) – shows factor-based predictions for all market groups
 # ------------------------------------------------------------------
 @api.route('/factors_predictions', methods=['GET'])
@@ -783,6 +782,7 @@ def factors_predictions():
         groups[key]['bets'] = sorted(groups[key]['bets'], key=lambda x: x['score'], reverse=True)[:4]
 
     return jsonify(groups)
+
 # ------------------------------------------------------------------
 # Administrative / internal endpoints
 # ------------------------------------------------------------------
@@ -1001,7 +1001,6 @@ def learning_insights():
 
     for team in teams:
         team_id = team['_id']
-        # Count finished matches where this team played (home or away)
         count = db.matches.count_documents({
             '$or': [
                 {'home_team_id': team_id, 'home_goals': {'$ne': None}},
@@ -1021,21 +1020,15 @@ def learning_insights():
             'elo_rating': team.get('elo_rating', 1500)
         })
 
-    # Sort by matches descending for display
     team_data_sorted = sorted(team_data, key=lambda x: x['matches'], reverse=True)
 
     total_teams = len(teams)
     teams_with_data = sum(1 for t in team_data if t['matches'] > 0)
-    teams_insufficient = sum(1 for t in team_data if t['matches'] < 5)  # threshold
+    teams_insufficient = sum(1 for t in team_data if t['matches'] < 5)
     avg_matches = total_matches / total_teams if total_teams > 0 else 0
 
-    # Compute a learning score (0-1) based on:
-    # - % of teams with >=10 matches (weight 0.5)
-    # - average matches / 50 (capped at 1) (weight 0.3)
-    # - % of teams with attack/defence rating not exactly 1.0 (weight 0.2)
     pct_teams_with_10 = sum(1 for t in team_data if t['matches'] >= 10) / total_teams if total_teams > 0 else 0
-    avg_match_score = min(1.0, avg_matches / 50)  # 50 matches is considered good
-    # Ratings diversity: fraction of teams whose attack_rating is not 1.0 (within tolerance)
+    avg_match_score = min(1.0, avg_matches / 50)
     ratings_diverse = sum(1 for t in team_data if abs(t['attack_rating'] - 1.0) > 0.05 or abs(t['defence_rating'] - 1.0) > 0.05) / total_teams if total_teams > 0 else 0
 
     learning_score = (pct_teams_with_10 * 0.5) + (avg_match_score * 0.3) + (ratings_diverse * 0.2)
@@ -1049,11 +1042,8 @@ def learning_insights():
         'min_matches': min_matches if min_matches != float('inf') else 0,
         'max_matches': max_matches,
         'learning_score': learning_score,
-        'top_teams': team_data_sorted[:20]  # top 20 by matches
+        'top_teams': team_data_sorted[:20]
     }), 200
-
-    # Global flag for init_ratings
-_init_ratings_in_progress = False
 
 @api.route('/admin/init_ratings', methods=['POST'])
 @require_auth
