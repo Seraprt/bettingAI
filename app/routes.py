@@ -306,6 +306,52 @@ def admin_status():
         'init_ratings': 'running' if _init_ratings_in_progress else 'idle'
     }), 200
 
+@api.route('/admin/evaluate_predictions', methods=['POST'])
+@require_auth
+@require_admin
+def evaluate_predictions():
+    """
+    Evaluate all Sure Bet predictions against actual match results.
+    Updates the predictions collection with 'won' or 'lost'.
+    """
+    from .prediction_engine import evaluate_market
+
+    # Get all predictions that have not been evaluated
+    predictions = list(db.predictions.find({'actual_outcome': None}))
+    evaluated = 0
+    skipped = 0
+
+    for pred in predictions:
+        match_id = pred.get('match_id')
+        market = pred.get('market')
+        if not match_id or not market:
+            continue
+
+        match = db.matches.find_one({'_id': ObjectId(match_id)})
+        if not match:
+            continue
+
+        # Only evaluate if match is finished
+        if match.get('home_goals') is None or match.get('away_goals') is None:
+            skipped += 1
+            continue
+
+        home_goals = match['home_goals']
+        away_goals = match['away_goals']
+
+        # Use the helper to determine if the bet won
+        won = evaluate_market(market, home_goals, away_goals)
+
+        db.predictions.update_one(
+            {'_id': pred['_id']},
+            {'$set': {'actual_outcome': 'won' if won else 'lost'}}
+        )
+        evaluated += 1
+
+    return jsonify({
+        'message': f'Evaluated {evaluated} predictions, skipped {skipped} (not finished).'
+    }), 200
+
 # ------------------------------------------------------------------
 # Prediction endpoints (with access control)
 # ------------------------------------------------------------------
@@ -602,14 +648,17 @@ def market_bets():
 @require_auth
 @require_admin
 def prediction_accuracy_details():
-    # Fetch all predictions that have actual_outcome set
-    predictions = list(db.predictions.find({'actual_outcome': {'$ne': None}}))
-    results = []
+    # Fetch all predictions that have actual_outcome set (won/lost)
+    resolved = list(db.predictions.find({'actual_outcome': {'$in': ['won', 'lost']}}))
+    pending = db.predictions.count_documents({'actual_outcome': None})
+    total_resolved = len(resolved)
+    correct = sum(1 for p in resolved if p.get('actual_outcome') == 'won')
+    accuracy = round(correct / total_resolved * 100, 2) if total_resolved > 0 else 0
+
+    # Group by correct score vs other markets
     correct_score_results = []
     other_results = []
-
-    for pred in predictions:
-        # Determine if it's a correct score prediction
+    for pred in resolved:
         is_correct_score = pred.get('market', '').startswith('correct_')
         entry = {
             'match': f"{pred.get('home_team', 'Unknown')} vs {pred.get('away_team', 'Unknown')}",
@@ -626,24 +675,21 @@ def prediction_accuracy_details():
         else:
             other_results.append(entry)
 
-    # Compute accuracy percentages
     def compute_stats(items):
         total = len(items)
         correct = sum(1 for i in items if i['was_correct'])
-        accuracy = round(correct / total * 100, 2) if total > 0 else 0
-        return {
-            'total': total,
-            'correct': correct,
-            'accuracy': accuracy,
-            'items': items
-        }
+        acc = round(correct / total * 100, 2) if total > 0 else 0
+        return {'total': total, 'correct': correct, 'accuracy': acc, 'items': items}
 
     return jsonify({
+        'total_resolved': total_resolved,
+        'correct': correct,
+        'accuracy': accuracy,
+        'pending': pending,
         'correct_score': compute_stats(correct_score_results),
         'other_markets': compute_stats(other_results),
-        'all': compute_stats(correct_score_results + other_results)
+        'all': compute_stats(resolved)
     })
-
 # ------------------------------------------------------------------
 # Factors Page (admin only) – shows factor-based predictions for all market groups
 # ------------------------------------------------------------------

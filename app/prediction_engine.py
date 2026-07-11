@@ -805,3 +805,65 @@ def get_market_groups(matches):
 # Export poisson for use in routes.py
 # ------------------------------------------------------------------
 poisson = poisson
+def evaluate_market(market, home_goals, away_goals):
+    """Return True if the bet would have won."""
+    # 1X2
+    if market == 'home_win':
+        return home_goals > away_goals
+    if market == 'draw':
+        return home_goals == away_goals
+    if market == 'away_win':
+        return away_goals > home_goals
+
+    # Double Chance
+    if market == '1X':
+        return home_goals >= away_goals
+    if market == 'X2':
+        return away_goals >= home_goals
+    if market == '12':
+        return home_goals != away_goals
+
+    # Over/Under
+    if market.startswith('over_'):
+        threshold = float(market.split('_')[1])
+        return (home_goals + away_goals) > threshold
+    if market.startswith('under_'):
+        threshold = float(market.split('_')[1])
+        return (home_goals + away_goals) < threshold
+
+    # BTTS
+    if market == 'btts_yes':
+        return home_goals > 0 and away_goals > 0
+    if market == 'btts_no':
+        return home_goals == 0 or away_goals == 0
+
+    # Team Totals (home or away)
+    if market.startswith('home_over_'):
+        threshold = float(market.split('_')[2])
+        return home_goals > threshold
+    if market.startswith('home_under_'):
+        threshold = float(market.split('_')[2])
+        return home_goals < threshold
+    if market.startswith('away_over_'):
+        threshold = float(market.split('_')[2])
+        return away_goals > threshold
+    if market.startswith('away_under_'):
+        threshold = float(market.split('_')[2])
+        return away_goals < threshold
+
+    # Handicaps (full goal handicaps)
+    if market.startswith('home_') and market not in ['home_win', 'home_over', 'home_under']:
+        handicap = float(market.split('_')[1])
+        return (home_goals + handicap) > away_goals
+    if market.startswith('away_') and market not in ['away_win', 'away_over', 'away_under']:
+        handicap = float(market.split('_')[1])
+        return (away_goals + handicap) > home_goals
+
+    # Correct Score
+    if market.startswith('correct_'):
+        score = market.split('_')[1]
+        expected_h, expected_a = map(int, score.split('-'))
+        return home_goals == expected_h and away_goals == expected_a
+
+    # Any other market: treat as lost
+    return False
