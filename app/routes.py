@@ -684,7 +684,7 @@ def prediction_accuracy_details():
                 'confidence': pred.get('confidence'),
                 'predicted_at': pred.get('predicted_at').isoformat() if pred.get('predicted_at') else None,
                 'actual_outcome': pred.get('actual_outcome'),
-                'was_correct': pred.get('actual_outcome') == 'won'
+                'was_correct': pred.get('actual_outcome') == 'won'  # ensure this is set
             }
             if is_correct_score:
                 correct_score_results.append(entry)
@@ -693,9 +693,12 @@ def prediction_accuracy_details():
 
         def compute_stats(items):
             total = len(items)
-            correct = sum(1 for i in items if i['was_correct'])
+            correct = sum(1 for i in items if i.get('was_correct', False))
             acc = round(correct / total * 100, 2) if total > 0 else 0
             return {'total': total, 'correct': correct, 'accuracy': acc, 'items': items}
+
+        # Combine all enriched entries for 'all' stats
+        all_enriched = correct_score_results + other_results
 
         return jsonify({
             'total_resolved': total_resolved,
@@ -704,14 +707,13 @@ def prediction_accuracy_details():
             'pending': pending,
             'correct_score': compute_stats(correct_score_results),
             'other_markets': compute_stats(other_results),
-            'all': compute_stats(resolved)
+            'all': compute_stats(all_enriched)  # pass the combined list
         })
     except Exception as e:
         logging.error(f"Error in prediction_accuracy_details: {e}")
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500# ------------------------------------------------------------------
-# Factors Page (admin only) – shows factor-based predictions for all market groups
-# ------------------------------------------------------------------
+        return jsonify({'error': str(e)}), 500
+    
 @api.route('/factors_predictions', methods=['GET'])
 @require_auth
 @require_admin
