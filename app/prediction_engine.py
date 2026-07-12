@@ -579,9 +579,9 @@ def get_safe_markets(match_doc):
 
 
 # ------------------------------------------------------------------
-# 11. Sure bets (ONE per match + secondary pick)
+# 11. Sure bets – with 89% confidence default
 # ------------------------------------------------------------------
-def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
+def get_sure_bets(matches, min_prob=0.8, min_confidence=0.89, max_matches=20):
     sure_list = []
     processed = 0
     for match in matches:
@@ -624,7 +624,6 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.7, max_matches=20):
         if best_market and best_prob >= min_prob:
             correct_score = get_most_likely_score(h_xg, a_xg)
 
-            # ---- Select secondary market (avoid contradiction with likely result) ----
             secondary_market = None
             secondary_prob = None
 
@@ -719,9 +718,12 @@ def get_time_remaining(match_date):
 
 
 # ------------------------------------------------------------------
-# 13. Market Groups (for the Market Page)
+# 13. Market Groups – with confidence filter (min_confidence = 0.89)
 # ------------------------------------------------------------------
-def get_market_groups(matches):
+def get_market_groups(matches, min_confidence=0.89):
+    from datetime import datetime
+    now = datetime.utcnow()
+
     groups = {
         'gg': {'name': 'Both Teams to Score (GG)', 'bets': []},
         '1x2': {'name': '1X2 (Highest Probability)', 'bets': []},
@@ -730,12 +732,17 @@ def get_market_groups(matches):
     }
 
     for match in matches:
-        if match.get('home_win_prob') is None:
+        # Skip live matches
+        if match.get('date') and match['date'] < now:
             continue
+
+        confidence = match.get('confidence', 0)
+        if confidence < min_confidence:
+            continue
+
         h_xg = match.get('home_xg', 1.2)
         a_xg = match.get('away_xg', 1.0)
         probs = compute_all_market_probs(h_xg, a_xg)
-        confidence = match.get('confidence', 0.5)
         home = db.teams.find_one({'_id': match['home_team_id']})
         away = db.teams.find_one({'_id': match['away_team_id']})
         home_name = home['name'] if home else 'Unknown'
@@ -801,13 +808,12 @@ def get_market_groups(matches):
 
     return groups
 
+
 # ------------------------------------------------------------------
-# Export poisson for use in routes.py
+# 14. evaluate_market (for prediction accuracy)
 # ------------------------------------------------------------------
-poisson = poisson
 def evaluate_market(market, home_goals, away_goals):
     """Return True if the bet would have won."""
-    # 1X2
     if market == 'home_win':
         return home_goals > away_goals
     if market == 'draw':
@@ -815,7 +821,6 @@ def evaluate_market(market, home_goals, away_goals):
     if market == 'away_win':
         return away_goals > home_goals
 
-    # Double Chance
     if market == '1X':
         return home_goals >= away_goals
     if market == 'X2':
@@ -823,7 +828,6 @@ def evaluate_market(market, home_goals, away_goals):
     if market == '12':
         return home_goals != away_goals
 
-    # Over/Under
     if market.startswith('over_'):
         threshold = float(market.split('_')[1])
         return (home_goals + away_goals) > threshold
@@ -831,13 +835,11 @@ def evaluate_market(market, home_goals, away_goals):
         threshold = float(market.split('_')[1])
         return (home_goals + away_goals) < threshold
 
-    # BTTS
     if market == 'btts_yes':
         return home_goals > 0 and away_goals > 0
     if market == 'btts_no':
         return home_goals == 0 or away_goals == 0
 
-    # Team Totals (home or away)
     if market.startswith('home_over_'):
         threshold = float(market.split('_')[2])
         return home_goals > threshold
@@ -851,7 +853,6 @@ def evaluate_market(market, home_goals, away_goals):
         threshold = float(market.split('_')[2])
         return away_goals < threshold
 
-    # Handicaps (full goal handicaps)
     if market.startswith('home_') and market not in ['home_win', 'home_over', 'home_under']:
         handicap = float(market.split('_')[1])
         return (home_goals + handicap) > away_goals
@@ -859,11 +860,15 @@ def evaluate_market(market, home_goals, away_goals):
         handicap = float(market.split('_')[1])
         return (away_goals + handicap) > home_goals
 
-    # Correct Score
     if market.startswith('correct_'):
         score = market.split('_')[1]
         expected_h, expected_a = map(int, score.split('-'))
         return home_goals == expected_h and away_goals == expected_a
 
-    # Any other market: treat as lost
     return False
+
+
+# ------------------------------------------------------------------
+# Export poisson for use in routes.py
+# ------------------------------------------------------------------
+poisson = poisson

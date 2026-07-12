@@ -27,7 +27,7 @@ api = Blueprint('api', __name__)
 _training_in_progress = False
 _recompute_in_progress = False
 _ingestion_in_progress = False
-_init_ratings_in_progress = False  # moved here
+_init_ratings_in_progress = False
 
 # ------------------------------------------------------------------
 # Authentication helpers (decorators)
@@ -181,7 +181,7 @@ def subscribe():
         return jsonify({'error': err}), 400
     return jsonify({'message': msg}), 200
 
-@api.route('/check-subscription', methods=['GET'])   # <-- FIXED: added '=' and correct parentheses
+@api.route('/check-subscription', methods=['GET'])
 @require_auth
 def check_subscription():
     premium = is_premium(g.user_id)
@@ -310,13 +310,8 @@ def admin_status():
 @require_auth
 @require_admin
 def evaluate_predictions():
-    """
-    Evaluate all Sure Bet predictions against actual match results.
-    Updates the predictions collection with 'won' or 'lost'.
-    """
     from .prediction_engine import evaluate_market
 
-    # Get all predictions that have not been evaluated
     predictions = list(db.predictions.find({'actual_outcome': None}))
     evaluated = 0
     skipped = 0
@@ -331,15 +326,12 @@ def evaluate_predictions():
         if not match:
             continue
 
-        # Only evaluate if match is finished
         if match.get('home_goals') is None or match.get('away_goals') is None:
             skipped += 1
             continue
 
         home_goals = match['home_goals']
         away_goals = match['away_goals']
-
-        # Use the helper to determine if the bet won
         won = evaluate_market(market, home_goals, away_goals)
 
         db.predictions.update_one(
@@ -548,14 +540,14 @@ def recompute_all():
     return jsonify({'message': 'Recompute started in background. Check logs for progress.'}), 202
 
 # ------------------------------------------------------------------
-# Sure Bets
+# Sure Bets (with 89% confidence default)
 # ------------------------------------------------------------------
 @api.route('/sure_bets', methods=['GET'])
 @require_auth
 @require_premium
 def sure_bets():
-    min_prob = float(request.args.get('min_prob', 0.6))
-    min_confidence = float(request.args.get('min_confidence', 0.5))
+    min_prob = float(request.args.get('min_prob', 0.8))
+    min_confidence = float(request.args.get('min_confidence', 0.89))
     days_ahead = int(request.args.get('days_ahead', 6))
 
     now = datetime.utcnow()
@@ -591,13 +583,15 @@ def sure_bets():
     return jsonify(sure_list)
 
 # ------------------------------------------------------------------
-# Market Page (groups: GG, 1X2, DC+Under, DC+GG, Draw)
+# Market Page (groups: GG, 1X2, DC+Under, DC+GG, Draw) with 89% confidence
 # ------------------------------------------------------------------
 @api.route('/market_bets', methods=['GET'])
 @require_auth
 @require_premium
 def market_bets():
     days_ahead = int(request.args.get('days_ahead', 14))
+    min_confidence = float(request.args.get('min_confidence', 0.89))
+
     now = datetime.utcnow()
     future = now + timedelta(days=days_ahead)
     matches = list(db.matches.find({'date': {'$gte': now, '$lte': future}}))
@@ -613,15 +607,17 @@ def market_bets():
             except Exception as e:
                 logging.error(f"Prediction failed for {m['_id']}: {e}")
 
-    groups = get_market_groups(matches)
+    groups = get_market_groups(matches, min_confidence)
 
-    # Add Draw group (using factor-based draw probability)
+    # Add Draw group (also filtered by confidence and exclude live)
     draw_group = {'name': 'Draw (Most Likely)', 'bets': []}
     for match in matches:
-        if match.get('home_win_prob') is None:
+        if match.get('date') and match['date'] < now:
+            continue
+        confidence = match.get('confidence', 0)
+        if confidence < min_confidence:
             continue
         draw_prob = match.get('draw_prob', 0)
-        confidence = match.get('confidence', 0.5)
         home = db.teams.find_one({'_id': match['home_team_id']})
         away = db.teams.find_one({'_id': match['away_team_id']})
         home_name = home['name'] if home else 'Unknown'
@@ -644,14 +640,11 @@ def market_bets():
 # ------------------------------------------------------------------
 # Prediction Accuracy Details (all predictions, grouped by market type)
 # ------------------------------------------------------------------
- # add this at the top if not already imported
-
 @api.route('/prediction_accuracy_details', methods=['GET'])
 @require_auth
 @require_admin
 def prediction_accuracy_details():
     try:
-        # Fetch all predictions that have actual_outcome set (won/lost)
         resolved = list(db.predictions.find({'actual_outcome': {'$in': ['won', 'lost']}}))
         pending = db.predictions.count_documents({'actual_outcome': None})
         total_resolved = len(resolved)
@@ -661,7 +654,6 @@ def prediction_accuracy_details():
         correct_score_results = []
         other_results = []
         for pred in resolved:
-            # Get team names from the stored IDs
             home_team_id = pred.get('home_team')
             away_team_id = pred.get('away_team')
             home_name = 'Unknown'
@@ -684,7 +676,7 @@ def prediction_accuracy_details():
                 'confidence': pred.get('confidence'),
                 'predicted_at': pred.get('predicted_at').isoformat() if pred.get('predicted_at') else None,
                 'actual_outcome': pred.get('actual_outcome'),
-                'was_correct': pred.get('actual_outcome') == 'won'  # ensure this is set
+                'was_correct': pred.get('actual_outcome') == 'won'
             }
             if is_correct_score:
                 correct_score_results.append(entry)
@@ -697,7 +689,6 @@ def prediction_accuracy_details():
             acc = round(correct / total * 100, 2) if total > 0 else 0
             return {'total': total, 'correct': correct, 'accuracy': acc, 'items': items}
 
-        # Combine all enriched entries for 'all' stats
         all_enriched = correct_score_results + other_results
 
         return jsonify({
@@ -707,13 +698,16 @@ def prediction_accuracy_details():
             'pending': pending,
             'correct_score': compute_stats(correct_score_results),
             'other_markets': compute_stats(other_results),
-            'all': compute_stats(all_enriched)  # pass the combined list
+            'all': compute_stats(all_enriched)
         })
     except Exception as e:
         logging.error(f"Error in prediction_accuracy_details: {e}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-    
+
+# ------------------------------------------------------------------
+# Factors Page (admin only) – with 89% confidence filter
+# ------------------------------------------------------------------
 @api.route('/factors_predictions', methods=['GET'])
 @require_auth
 @require_admin
@@ -722,6 +716,8 @@ def factors_predictions():
         compute_all_market_probs, get_most_likely_score, kelly_fraction, poisson
     )
     days_ahead = int(request.args.get('days_ahead', 14))
+    min_confidence = float(request.args.get('min_confidence', 0.89))
+
     now = datetime.utcnow()
     future = now + timedelta(days=days_ahead)
     matches = list(db.matches.find({'date': {'$gte': now, '$lte': future}}))
@@ -737,7 +733,6 @@ def factors_predictions():
             except Exception as e:
                 logging.error(f"Prediction failed for {m['_id']}: {e}")
 
-    # Define groups (same as market page + correct_score)
     groups = {
         'gg': {'name': 'Both Teams to Score (GG)', 'bets': []},
         '1x2': {'name': '1X2 (Highest Probability)', 'bets': []},
@@ -747,13 +742,15 @@ def factors_predictions():
     }
 
     for match in matches:
-        if match.get('home_win_prob') is None:
+        if match.get('date') and match['date'] < now:
             continue
+        confidence = match.get('confidence', 0)
+        if confidence < min_confidence:
+            continue
+
         h_xg = match.get('home_xg', 1.2)
         a_xg = match.get('away_xg', 1.0)
         probs = compute_all_market_probs(h_xg, a_xg)
-        confidence = match.get('confidence', 0.5)
-
         home = db.teams.find_one({'_id': match['home_team_id']})
         away = db.teams.find_one({'_id': match['away_team_id']})
         home_name = home['name'] if home else 'Unknown'
@@ -762,7 +759,7 @@ def factors_predictions():
         home_factors = match.get('home_factors', {})
         away_factors = match.get('away_factors', {})
 
-        # 1. GG (Both Teams to Score)
+        # 1. GG
         gg_prob = probs.get('btts_yes', 0)
         groups['gg']['bets'].append({
             'match': match_label,
@@ -775,7 +772,7 @@ def factors_predictions():
             'away_factors': away_factors
         })
 
-        # 2. 1X2 – pick highest probability outcome
+        # 2. 1X2
         home_win = probs.get('home_win', 0)
         draw = probs.get('draw', 0)
         away_win = probs.get('away_win', 0)
@@ -790,13 +787,12 @@ def factors_predictions():
             'match_id': str(match['_id']),
             'home_factors': home_factors,
             'away_factors': away_factors,
-            # Kelly stakes for 1X2 (assuming odds = 2.0)
             'home_stake': kelly_fraction(home_win, 2.0),
             'draw_stake': kelly_fraction(draw, 2.0),
             'away_stake': kelly_fraction(away_win, 2.0)
         })
 
-        # 3. Double Chance + Under 3.5
+        # 3. DC + Under 3.5
         dc_1x = probs.get('1X', 0)
         dc_x2 = probs.get('X2', 0)
         best_dc = max(dc_1x, dc_x2)
@@ -814,7 +810,7 @@ def factors_predictions():
             'away_factors': away_factors
         })
 
-        # 4. Double Chance + GG
+        # 4. DC + GG
         gg_prob = probs.get('btts_yes', 0)
         combined_gg_prob = best_dc * gg_prob
         groups['dc_gg']['bets'].append({
@@ -828,9 +824,8 @@ def factors_predictions():
             'away_factors': away_factors
         })
 
-        # 5. Correct Score – most likely scoreline and its probability
+        # 5. Correct Score
         correct_score = get_most_likely_score(h_xg, a_xg)
-        # Compute probability of that exact score
         h, a = map(int, correct_score.split('-'))
         score_prob = poisson.pmf(h, h_xg) * poisson.pmf(a, a_xg)
         groups['correct_score']['bets'].append({
@@ -844,7 +839,6 @@ def factors_predictions():
             'away_factors': away_factors
         })
 
-    # Sort and keep top 4 per group
     for key in groups:
         groups[key]['bets'] = sorted(groups[key]['bets'], key=lambda x: x['score'], reverse=True)[:4]
 
@@ -878,15 +872,11 @@ def predict_all():
                 logging.error(f"Failed to predict {m['_id']}: {e}")
     return jsonify({'message': f'Predictions computed for {count} matches.'}), 200
 
-# ------------------------------------------------------------------
-# Training (background)
-# ------------------------------------------------------------------
 @api.route('/train', methods=['POST'])
 def trigger_training():
     global _training_in_progress
     if _training_in_progress:
         return jsonify({'message': 'Training already in progress. Please wait.'}), 409
-
     from .train_model import run_training
     _training_in_progress = True
 
@@ -903,9 +893,6 @@ def trigger_training():
     thread.start()
     return jsonify({'message': 'Training started in background. Check logs for progress.'}), 202
 
-# ------------------------------------------------------------------
-# Ingestion (background with progress logging)
-# ------------------------------------------------------------------
 def ingestion_task():
     global _ingestion_in_progress
     from .data_ingestion import fetch_all_football
@@ -1056,10 +1043,6 @@ def prediction_accuracy():
 @require_auth
 @require_admin
 def learning_insights():
-    """
-    Returns statistics about how much data the system has collected per team,
-    and an overall learning score (0-1) indicating data quality.
-    """
     teams = list(db.teams.find({}))
     team_data = []
     total_matches = 0
@@ -1088,7 +1071,6 @@ def learning_insights():
         })
 
     team_data_sorted = sorted(team_data, key=lambda x: x['matches'], reverse=True)
-
     total_teams = len(teams)
     teams_with_data = sum(1 for t in team_data if t['matches'] > 0)
     teams_insufficient = sum(1 for t in team_data if t['matches'] < 5)
@@ -1109,7 +1091,7 @@ def learning_insights():
         'min_matches': min_matches if min_matches != float('inf') else 0,
         'max_matches': max_matches,
         'learning_score': learning_score,
-        'top_teams': team_data_sorted[:20]
+        'top_teams': team_data_sorted[:1000]
     }), 200
 
 @api.route('/admin/init_ratings', methods=['POST'])
@@ -1119,7 +1101,6 @@ def admin_init_ratings():
     global _init_ratings_in_progress
     if _init_ratings_in_progress:
         return jsonify({'message': 'Initialisation already in progress.'}), 409
-
     from .init_ratings import compute_ratings_from_all_matches
 
     def init_task():
