@@ -351,7 +351,7 @@ def evaluate_predictions():
 @require_auth
 def today_matches():
     now = datetime.utcnow()
-    future = now + timedelta(days=14)
+    future = now + timedelta(days=20)
     matches = list(db.matches.find({
         'date': {'$gte': now, '$lte': future}
     }).sort('date', 1))
