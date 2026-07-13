@@ -8,7 +8,7 @@ import traceback
 from .init_ratings import compute_ratings_from_all_matches
 from functools import wraps
 from .prediction_engine import (
-    predict, get_best_market, get_sure_bets, get_safe_markets, get_time_remaining,
+    generate_detailed_reason, predict, get_best_market, get_sure_bets, get_safe_markets, get_time_remaining,
     compute_all_market_probs, get_market_groups, get_most_likely_score, kelly_fraction
 )
 from .auth import (
@@ -561,46 +561,140 @@ def recompute_all():
 # ------------------------------------------------------------------
 # Sure Bets (with 89% confidence default)
 # ------------------------------------------------------------------
-@api.route('/sure_bets', methods=['GET'])
-@require_auth
-@require_premium
-def sure_bets():
-    min_prob = float(request.args.get('min_prob', 0.8))
-    min_confidence = float(request.args.get('min_confidence', 0.89))
-    days_ahead = int(request.args.get('days_ahead', 6))
+def get_sure_bets(matches, min_prob=0.8, min_confidence=0.89, max_matches=20):
+    sure_list = []
+    processed = 0
+    for match in matches:
+        if match.get('home_win_prob') is None:
+            continue
+        confidence = match.get('confidence', 0)
+        if confidence < min_confidence:
+            continue
 
-    now = datetime.utcnow()
-    future = now + timedelta(days=days_ahead)
-    matches = list(db.matches.find({'date': {'$gte': now, '$lte': future}}))
+        h_xg = match.get('home_xg', 1.2)
+        a_xg = match.get('away_xg', 1.0)
+        probs = compute_all_market_probs(h_xg, a_xg)
+        context = match.get('context', {})
 
-    if not matches:
-        return jsonify({'message': 'No upcoming matches found.'}), 200
+        home = db.teams.find_one({'_id': match['home_team_id']})
+        away = db.teams.find_one({'_id': match['away_team_id']})
+        home_name = home['name'] if home else 'Unknown'
+        away_name = away['name'] if away else 'Unknown'
 
-    sure_list = get_sure_bets(matches, min_prob, min_confidence)
+        excluded = ['under_0.5', 'over_5.5', 'under_5.5', 'over_6.5', 'under_6.5', 'over_7.5', 'under_7.5']
 
-    # Store for learning
-    for bet in sure_list:
-        match = db.matches.find_one({'_id': ObjectId(bet['match_id'])})
-        if match:
-            db.predictions.update_one(
-                {'match_id': bet['match_id'], 'market': bet['market']},
-                {'$set': {
-                    'match_id': bet['match_id'],
-                    'market': bet['market'],
-                    'probability': bet['probability'],
-                    'confidence': bet['confidence'],
-                    'predicted_at': datetime.utcnow(),
-                    'match_date': match['date'],
-                    'actual_outcome': None,
-                    'home_team': match['home_team_id'],
-                    'away_team': match['away_team_id'],
-                    'tournament': match.get('tournament')
-                }},
-                upsert=True
+        best_market = None
+        best_score = 0
+        best_prob = 0
+        for market, prob in probs.items():
+            if market.startswith('correct_'):
+                continue
+            if market in excluded:
+                continue
+            if prob < min_prob:
+                continue
+            if context.get('is_derby') and market in ['home_win', 'away_win'] and prob < 0.65:
+                continue
+            score = prob * confidence
+            if score > best_score:
+                best_score = score
+                best_market = market
+                best_prob = prob
+
+        if best_market and best_prob >= min_prob:
+            correct_score = get_most_likely_score(h_xg, a_xg)
+
+            # ---- Determine the likely result from the primary market (if possible) ----
+            likely_result = None
+            # If the primary market is a correct score, infer result from it.
+            if best_market.startswith('correct_'):
+                score_str = best_market.split('_')[1]
+                h, a = map(int, score_str.split('-'))
+                if h > a:
+                    likely_result = 'home'
+                elif h < a:
+                    likely_result = 'away'
+                else:
+                    likely_result = 'draw'
+            else:
+                # Otherwise, use the 1X2 probabilities as before
+                home_prob = probs.get('home_win', 0)
+                draw_prob = probs.get('draw', 0)
+                away_prob = probs.get('away_win', 0)
+                max_prob = max(home_prob, draw_prob, away_prob)
+                if max_prob == home_prob:
+                    likely_result = 'home'
+                elif max_prob == draw_prob:
+                    likely_result = 'draw'
+                else:
+                    likely_result = 'away'
+
+            # ---- Select secondary market (avoid contradiction) ----
+            secondary_market = None
+            secondary_prob = None
+
+            # Candidate list with display names
+            secondary_candidates = [
+                ('home_win', 'home_win'),
+                ('12', 'home or away'),
+                ('away_win', 'away_win'),
+                ('1X', 'home or draw'),
+                ('X2', 'draw or away'),
+                ('any_team_over_2.5_goals', 'Over 2.5 goals'),
+                ('any_team_under_2.5_goals', 'Under 2.5 goals')
+            ]
+
+            # Remove candidates that contradict the likely result
+            if likely_result == 'home':
+                secondary_candidates = [c for c in secondary_candidates if c[0] not in ['X2']]
+            elif likely_result == 'away':
+                secondary_candidates = [c for c in secondary_candidates if c[0] not in ['1X']]
+            elif likely_result == 'draw':
+                secondary_candidates = [c for c in secondary_candidates if c[0] not in ['12']]
+
+            # Build candidates with scores, excluding the primary market
+            candidates = []
+            for mkt, _ in secondary_candidates:
+                if mkt == best_market:
+                    continue
+                prob = probs.get(mkt)
+                if prob is None:
+                    continue
+                if context.get('is_derby') and mkt in ['home_win', 'away_win'] and prob < 0.5:
+                    continue
+                score = prob * confidence
+                candidates.append((score, mkt, prob))
+
+            if candidates:
+                candidates.sort(reverse=True, key=lambda x: x[0])
+                secondary_market = candidates[0][1]
+                secondary_prob = candidates[0][2]
+
+            reason = generate_detailed_reason(
+                match, best_market, best_prob, confidence,
+                home_name, away_name, correct_score,
+                secondary_market, secondary_prob
             )
 
-    return jsonify(sure_list)
+            sure_list.append({
+                'match': f"{home_name} vs {away_name}",
+                'tournament': match.get('tournament'),
+                'market': best_market,
+                'probability': best_prob,
+                'confidence': confidence,
+                'score': best_score,
+                'reason': reason,
+                'match_id': str(match['_id']),
+                'time_remaining': get_time_remaining(match['date']),
+                'correct_score': correct_score
+            })
 
+        processed += 1
+        if processed >= max_matches:
+            break
+
+    sure_list.sort(key=lambda x: x['score'], reverse=True)
+    return sure_list[:20]
 # ------------------------------------------------------------------
 # Market Page (groups: GG, 1X2, DC+Under, DC+GG, Draw) with 89% confidence
 # ------------------------------------------------------------------
