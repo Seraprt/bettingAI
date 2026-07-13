@@ -8,6 +8,7 @@ from .factors import (
     get_h2h_score, get_weather_score, get_fatigue_score, get_news_score,
     get_attack_rating, get_defence_rating
 )
+from bson import ObjectId
 from .utils import get_weather
 import logging
 import os
@@ -872,3 +873,24 @@ def evaluate_market(market, home_goals, away_goals):
 # Export poisson for use in routes.py
 # ------------------------------------------------------------------
 poisson = poisson
+
+def store_prediction(match_id, market, probability, confidence):
+    match = db.matches.find_one({'_id': ObjectId(match_id)})
+    if not match:
+        return
+    db.predictions.update_one(
+        {'match_id': str(match_id), 'market': market},
+        {'$set': {
+            'match_id': str(match_id),
+            'market': market,
+            'probability': probability,
+            'confidence': confidence,
+            'predicted_at': datetime.utcnow(),
+            'match_date': match['date'],
+            'actual_outcome': None,
+            'home_team': match['home_team_id'],
+            'away_team': match['away_team_id'],
+            'tournament': match.get('tournament')
+        }},
+        upsert=True
+    )

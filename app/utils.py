@@ -3,7 +3,8 @@ import math
 from datetime import datetime, timedelta
 from textblob import TextBlob
 from .config import Config
-
+from .db import db
+from bson import ObjectId
 def get_weather(lat, lon, match_time):
     url = 'https://api.openweathermap.org/data/2.5/weather'
     params = {
@@ -53,3 +54,24 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
+
+def store_prediction(match_id, market, probability, confidence):
+    match = db.matches.find_one({'_id': ObjectId(match_id)})
+    if not match:
+        return
+    db.predictions.update_one(
+        {'match_id': str(match_id), 'market': market},
+        {'$set': {
+            'match_id': str(match_id),
+            'market': market,
+            'probability': probability,
+            'confidence': confidence,
+            'predicted_at': datetime.utcnow(),
+            'match_date': match['date'],
+            'actual_outcome': None,
+            'home_team': match['home_team_id'],
+            'away_team': match['away_team_id'],
+            'tournament': match.get('tournament')
+        }},
+        upsert=True
+    )

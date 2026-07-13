@@ -478,12 +478,32 @@ def best_bets():
 
         home = db.teams.find_one({'_id': match['home_team_id']})
         away = db.teams.find_one({'_id': match['away_team_id']})
+        home_name = home['name'] if home else 'Unknown'
+        away_name = away['name'] if away else 'Unknown'
 
         market = best['market']
         all_markets.add(market)
 
+        # ----- STORE PREDICTION (like sure bets) -----
+        db.predictions.update_one(
+            {'match_id': str(match['_id']), 'market': market},
+            {'$set': {
+                'match_id': str(match['_id']),
+                'market': market,
+                'probability': prob,
+                'confidence': best['confidence'],
+                'predicted_at': datetime.utcnow(),
+                'match_date': match['date'],
+                'actual_outcome': None,
+                'home_team': match['home_team_id'],
+                'away_team': match['away_team_id'],
+                'tournament': match.get('tournament')
+            }},
+            upsert=True
+        )
+
         best_bets.append({
-            'match': f"{home['name'] if home else 'Unknown'} vs {away['name'] if away else 'Unknown'}",
+            'match': f"{home_name} vs {away_name}",
             'tournament': match.get('tournament'),
             'market': market,
             'probability': prob,
@@ -501,7 +521,6 @@ def best_bets():
         'bets': limited_bets,
         'available_markets': sorted(list(all_markets))
     })
-
 # ------------------------------------------------------------------
 # Recompute All (background)
 # ------------------------------------------------------------------
@@ -591,7 +610,6 @@ def sure_bets():
 def market_bets():
     days_ahead = int(request.args.get('days_ahead', 14))
     min_confidence = float(request.args.get('min_confidence', 0.89))
-
     now = datetime.utcnow()
     future = now + timedelta(days=days_ahead)
     matches = list(db.matches.find({'date': {'$gte': now, '$lte': future}}))
@@ -609,7 +627,7 @@ def market_bets():
 
     groups = get_market_groups(matches, min_confidence)
 
-    # Add Draw group (also filtered by confidence and exclude live)
+    # Also add Draw group (already done inside, but we'll store)
     draw_group = {'name': 'Draw (Most Likely)', 'bets': []}
     for match in matches:
         if match.get('date') and match['date'] < now:
@@ -635,8 +653,27 @@ def market_bets():
     draw_group['bets'] = sorted(draw_group['bets'], key=lambda x: x['score'], reverse=True)[:4]
     groups['draw'] = draw_group
 
-    return jsonify(groups)
+    # ----- STORE ALL PREDICTIONS FROM ALL GROUPS -----
+    for group_key, group in groups.items():
+        for bet in group['bets']:
+            db.predictions.update_one(
+                {'match_id': bet['match_id'], 'market': bet['market']},
+                {'$set': {
+                    'match_id': bet['match_id'],
+                    'market': bet['market'],
+                    'probability': bet['probability'],
+                    'confidence': bet['confidence'],
+                    'predicted_at': datetime.utcnow(),
+                    'match_date': match['date'] if 'match' in locals() else None,  # need match date; we can fetch from match_id
+                    'actual_outcome': None,
+                    'home_team': None,  # we'll fill later if needed
+                    'away_team': None,
+                    'tournament': None
+                }},
+                upsert=True
+            )
 
+    return jsonify(groups)
 # ------------------------------------------------------------------
 # Prediction Accuracy Details (all predictions, grouped by market type)
 # ------------------------------------------------------------------
