@@ -13,9 +13,10 @@ from .train_model import run_training
 from .prediction_engine import predict
 import logging
 
-# Keep-alive function (unchanged)
+# Keep-alive function – pings the backend health endpoint
 def keep_alive():
-    host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'bettingai-ml4c.onrender.com')
+    # Use the current backend hostname (change if needed)
+    host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'bettingai-argh.onrender.com')
     url = f"https://{host}/api/health"
     while True:
         try:
@@ -36,7 +37,14 @@ def create_app():
     mail = Mail(app)
     app.extensions['mail'] = mail   # so auth.py can access it
 
-    CORS(app, origins=["*"])
+    # ---- CORS – allow your frontend and localhost ----
+    CORS(app, origins=[
+        "https://xtech-bet-exyq.onrender.com",   # your frontend URL
+        "http://localhost:3000",                 # local dev
+        "https://bettingai-argh.onrender.com",   # your backend URL (optional)
+          # remove this in production if you want to restrict to the above
+    ])
+
     app.register_blueprint(api, url_prefix='/api')
 
     with app.app_context():
@@ -61,7 +69,5 @@ def create_app():
             keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
             keep_alive_thread.start()
             logging.info("✅ Keep-alive thread started (pings every 4 minutes)")
-
-           
 
     return app

@@ -582,7 +582,7 @@ def get_safe_markets(match_doc):
 # ------------------------------------------------------------------
 # 11. Sure bets – with 89% confidence default
 # ------------------------------------------------------------------
-def get_sure_bets(matches, min_prob=0.8, min_confidence=0.89, max_matches=20):
+def get_sure_bets(matches, min_prob=0.8, min_confidence=0.89, max_matches=50):
     sure_list = []
     processed = 0
     for match in matches:
@@ -625,19 +625,32 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.89, max_matches=20):
         if best_market and best_prob >= min_prob:
             correct_score = get_most_likely_score(h_xg, a_xg)
 
+            # ---- Determine the likely result from the primary market ----
+            likely_result = None
+            if best_market.startswith('correct_'):
+                score_str = best_market.split('_')[1]
+                h, a = map(int, score_str.split('-'))
+                if h > a:
+                    likely_result = 'home'
+                elif h < a:
+                    likely_result = 'away'
+                else:
+                    likely_result = 'draw'
+            else:
+                home_prob = probs.get('home_win', 0)
+                draw_prob = probs.get('draw', 0)
+                away_prob = probs.get('away_win', 0)
+                max_prob = max(home_prob, draw_prob, away_prob)
+                if max_prob == home_prob:
+                    likely_result = 'home'
+                elif max_prob == draw_prob:
+                    likely_result = 'draw'
+                else:
+                    likely_result = 'away'
+
+            # ---- Select secondary market (avoid contradiction) ----
             secondary_market = None
             secondary_prob = None
-
-            home_prob = probs.get('home_win', 0)
-            draw_prob = probs.get('draw', 0)
-            away_prob = probs.get('away_win', 0)
-            max_prob = max(home_prob, draw_prob, away_prob)
-            if max_prob == home_prob:
-                likely_result = 'home'
-            elif max_prob == draw_prob:
-                likely_result = 'draw'
-            else:
-                likely_result = 'away'
 
             secondary_candidates = [
                 ('home_win', 'home_win'),
@@ -697,9 +710,7 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.89, max_matches=20):
             break
 
     sure_list.sort(key=lambda x: x['score'], reverse=True)
-    return sure_list[:20]
-
-
+    return sure_list[:50]
 # ------------------------------------------------------------------
 # 12. Time remaining helper
 # ------------------------------------------------------------------
