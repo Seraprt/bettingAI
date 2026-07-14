@@ -381,8 +381,19 @@ def generate_detailed_reason(match_doc, market, probability, confidence,
     h_xg = match_doc.get('home_xg', 1.2)
     a_xg = match_doc.get('away_xg', 1.0)
 
+    # ---- Get attack/defence ratings (if available) ----
+    home_id = match_doc['home_team_id']
+    away_id = match_doc['away_team_id']
+    home = db.teams.find_one({'_id': home_id})
+    away = db.teams.find_one({'_id': away_id})
+    home_attack = home.get('attack_rating', 1.0) if home else 1.0
+    home_defence = home.get('defence_rating', 1.0) if home else 1.0
+    away_attack = away.get('attack_rating', 1.0) if away else 1.0
+    away_defence = away.get('defence_rating', 1.0) if away else 1.0
+
     reason_parts = []
 
+    # ---- Tournament context ----
     if context.get('is_final'):
         reason_parts.append("🏆 This is a FINAL – high motivation and intensity expected.")
     elif context.get('is_knockout'):
@@ -392,6 +403,11 @@ def generate_detailed_reason(match_doc, market, probability, confidence,
     if context.get('is_derby'):
         reason_parts.append("⚔️ This is a DERBY – form and statistics can be overridden by rivalry and emotion.")
 
+    # ---- Attack/Defence ratings ----
+    reason_parts.append(f"⚡ Home attack {home_attack:.2f} vs away defence {away_defence:.2f} → home xG {h_xg:.2f}")
+    reason_parts.append(f"🛡️ Away attack {away_attack:.2f} vs home defence {home_defence:.2f} → away xG {a_xg:.2f}")
+
+    # ---- Strength & Form ----
     home_strength = home_factors.get('strength', 50)
     away_strength = away_factors.get('strength', 50)
     home_form = home_factors.get('form', 0.5)
@@ -411,6 +427,7 @@ def generate_detailed_reason(match_doc, market, probability, confidence,
     else:
         reason_parts.append(f"📊 Form is similar ({home_form:.2f} vs {away_form:.2f})")
 
+    # ---- Home/Away advantage ----
     home_adv = home_factors.get('home_away', 0.5)
     away_adv = away_factors.get('home_away', 0.5)
     if home_adv > 0.65:
@@ -418,6 +435,7 @@ def generate_detailed_reason(match_doc, market, probability, confidence,
     elif away_adv < 0.35:
         reason_parts.append(f"✈️ {away_team_name} struggles away from home ({away_adv:.2f})")
 
+    # ---- Fatigue & News ----
     home_fatigue = home_factors.get('fatigue', 1.0)
     away_fatigue = away_factors.get('fatigue', 1.0)
     if home_fatigue < 0.8:
@@ -436,12 +454,14 @@ def generate_detailed_reason(match_doc, market, probability, confidence,
     elif away_news < 0.4:
         reason_parts.append(f"📰 Negative news for {away_team_name}")
 
+    # ---- Head-to-head ----
     h2h = home_factors.get('h2h', 0.5)
     if h2h > 0.7:
         reason_parts.append(f"📊 Historical advantage for {home_team_name} in head-to-head")
     elif h2h < 0.3:
         reason_parts.append(f"📊 Historical advantage for {away_team_name} in head-to-head")
 
+    # ---- Market-specific ----
     total_xg = h_xg + a_xg
     if 'over' in market or 'under' in market:
         reason_parts.append(f"⚽ Total expected goals = {total_xg:.2f} (home {h_xg:.2f}, away {a_xg:.2f})")
@@ -479,8 +499,6 @@ def generate_detailed_reason(match_doc, market, probability, confidence,
         reason_parts.append("Factors are balanced, but this market still offers value.")
 
     return " | ".join(reason_parts)
-
-
 # ------------------------------------------------------------------
 # 8. Get best market (for Best Bets)
 # ------------------------------------------------------------------
@@ -654,7 +672,6 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.89, max_matches=50):
 
             secondary_candidates = [
                 ('home_win', 'home_win'),
-                ('12', 'home or away'),
                 ('away_win', 'away_win'),
                 ('1X', 'home or draw'),
                 ('X2', 'draw or away'),
@@ -667,7 +684,7 @@ def get_sure_bets(matches, min_prob=0.8, min_confidence=0.89, max_matches=50):
             elif likely_result == 'away':
                 secondary_candidates = [c for c in secondary_candidates if c[0] not in ['1X']]
             elif likely_result == 'draw':
-                secondary_candidates = [c for c in secondary_candidates if c[0] not in ['12']]
+                secondary_candidates = [c for c in secondary_candidates if c[0] not in ['1X', 'X2']]
 
             candidates = []
             for mkt, _ in secondary_candidates:
