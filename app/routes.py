@@ -622,9 +622,12 @@ def market_bets():
             except Exception as e:
                 logging.error(f"Prediction failed for {m['_id']}: {e}")
 
+    # Build a mapping of match_id -> match date (isoformat)
+    match_dates = {str(m['_id']): m['date'].isoformat() for m in matches}
+
     groups = get_market_groups(matches, min_confidence)
 
-    # Also add Draw group (already done inside, but we'll store)
+    # Add Draw group (already done inside, but we'll store)
     draw_group = {'name': 'Draw (Most Likely)', 'bets': []}
     for match in matches:
         if match.get('date') and match['date'] < now:
@@ -645,14 +648,26 @@ def market_bets():
             'probability': draw_prob,
             'confidence': confidence,
             'score': score,
-            'match_id': str(match['_id'])
+            'match_id': str(match['_id']),
+            'date': match['date'].isoformat()   # <-- ADD DATE
         })
     draw_group['bets'] = sorted(draw_group['bets'], key=lambda x: x['score'], reverse=True)[:4]
     groups['draw'] = draw_group
 
-    # ----- STORE ALL PREDICTIONS FROM ALL GROUPS -----
+    # ---- Add date to all bets from get_market_groups ----
     for group_key, group in groups.items():
         for bet in group['bets']:
+            bet['date'] = match_dates.get(bet['match_id'])
+
+    # ----- STORE ALL PREDICTIONS FROM ALL GROUPS (fix the storage bug) -----
+    for group_key, group in groups.items():
+        for bet in group['bets']:
+            # Fetch match date from the match_dates dict using match_id
+            match_date_str = match_dates.get(bet['match_id'])
+            if match_date_str:
+                match_date = datetime.fromisoformat(match_date_str)
+            else:
+                match_date = None
             db.predictions.update_one(
                 {'match_id': bet['match_id'], 'market': bet['market']},
                 {'$set': {
@@ -661,9 +676,9 @@ def market_bets():
                     'probability': bet['probability'],
                     'confidence': bet['confidence'],
                     'predicted_at': datetime.utcnow(),
-                    'match_date': match['date'] if 'match' in locals() else None,  # need match date; we can fetch from match_id
+                    'match_date': match_date,
                     'actual_outcome': None,
-                    'home_team': None,  # we'll fill later if needed
+                    'home_team': None,
                     'away_team': None,
                     'tournament': None
                 }},
@@ -671,7 +686,6 @@ def market_bets():
             )
 
     return jsonify(groups)
-# ------------------------------------------------------------------
 # Prediction Accuracy Details (all predictions, grouped by market type)
 # ------------------------------------------------------------------
 @api.route('/prediction_accuracy_details', methods=['GET'])
