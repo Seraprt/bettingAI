@@ -590,7 +590,7 @@ def sure_bets():
                     'probability': bet['probability'],
                     'confidence': bet['confidence'],
                     'predicted_at': datetime.utcnow(),
-                    'match_date': match['date'],
+                    'match_date': match['date'].isoformat(),
                     'actual_outcome': None,
                     'home_team': match['home_team_id'],
                     'away_team': match['away_team_id'],
@@ -722,6 +722,7 @@ def prediction_accuracy_details():
                 'market': pred.get('market'),
                 'probability': pred.get('probability'),
                 'confidence': pred.get('confidence'),
+                'match_date': pred.get('match_date').isoformat() if pred.get('match_date') else None,
                 'predicted_at': pred.get('predicted_at').isoformat() if pred.get('predicted_at') else None,
                 'actual_outcome': pred.get('actual_outcome'),
                 'was_correct': pred.get('actual_outcome') == 'won'
