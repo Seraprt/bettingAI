@@ -49,6 +49,7 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+
 def require_premium(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -344,6 +345,36 @@ def evaluate_predictions():
         'message': f'Evaluated {evaluated} predictions, skipped {skipped} (not finished).'
     }), 200
 
+
+def get_historical_context(home_id, away_id, match_date):
+    """Return a short string with historical match stats between the two teams."""
+    # Get last 5 meetings
+    matches = list(db.matches.find({
+        '$or': [
+            {'home_team_id': home_id, 'away_team_id': away_id},
+            {'home_team_id': away_id, 'away_team_id': home_id}
+        ],
+        'date': {'$lt': match_date},
+        'home_goals': {'$ne': None},
+        'away_goals': {'$ne': None}
+    }).sort('date', -1).limit(5))
+    
+    if not matches:
+        return "No recent head-to-head data available."
+    
+    total_goals = sum(m['home_goals'] + m['away_goals'] for m in matches)
+    avg_goals = total_goals / len(matches)
+    over_2_5 = sum(1 for m in matches if m['home_goals'] + m['away_goals'] > 2.5)
+    btts = sum(1 for m in matches if m['home_goals'] > 0 and m['away_goals'] > 0)
+    home_wins = sum(1 for m in matches if (m['home_team_id'] == home_id and m['home_goals'] > m['away_goals']) or (m['away_team_id'] == home_id and m['away_goals'] > m['home_goals']))
+    
+    parts = []
+    if len(matches) >= 3:
+        parts.append(f"In their last {len(matches)} meetings, {over_2_5} had over 2.5 goals, {btts} saw both teams score, and the home side won {home_wins} times.")
+    else:
+        parts.append(f"In their last {len(matches)} meeting(s), average goals were {avg_goals:.1f} per game.")
+    return " ".join(parts)    
+
 # ------------------------------------------------------------------
 # Prediction endpoints (with access control)
 # ------------------------------------------------------------------
@@ -485,13 +516,15 @@ def best_bets():
         away_name = away['name'] if away else 'Unknown'
         market = best['market']
 
-        # ---- SECONDARY PICK (like sure bets) ----
+        # ---- Historical context ----
+        historical_note = get_historical_context(match['home_team_id'], match['away_team_id'], match['date'])
+
+        # ---- Secondary pick ----
         h_xg = match.get('home_xg', 1.2)
         a_xg = match.get('away_xg', 1.0)
         probs = compute_all_market_probs(h_xg, a_xg)
         confidence = best['confidence']
 
-        # List of candidate secondary markets (user-specified)
         secondary_candidates = [
             ('1X', '1X (Home or Draw)'),
             ('X2', 'X2 (Draw or Away)'),
@@ -510,18 +543,13 @@ def best_bets():
         secondary_market = None
         secondary_prob = None
         secondary_score = 0
-        secondary_reason = ""
-
         for mkt_key, mkt_label in secondary_candidates:
             if mkt_key == market:
                 continue
             prob_val = probs.get(mkt_key)
             if prob_val is None:
                 continue
-            # Skip trivial markets that are almost always high
-            if mkt_key == 'over_0.5':
-                continue
-            if mkt_key == 'under_4.5':
+            if mkt_key == 'over_0.5' or mkt_key == 'under_4.5':
                 continue
             score = prob_val * confidence
             if prob_val > 0.85:
@@ -530,12 +558,22 @@ def best_bets():
                 secondary_score = score
                 secondary_market = mkt_key
                 secondary_prob = prob_val
-                secondary_reason = f"Secondary pick: {mkt_label} with probability {(prob_val*100):.1f}% and confidence {(confidence*100):.1f}%."
 
+        # ---- Build the primary reason with comparison ----
+        primary_reason = best['reason']
         if secondary_market and secondary_prob is not None:
-            existing_reason = best['reason']
-            best['reason'] = f"{existing_reason} | {secondary_reason}"
+            comparison = (
+                f"The primary market '{best['market']}' was chosen because it has the highest combined score "
+                f"(probability {best['probability']*100:.1f}% × confidence {best['confidence']*100:.1f}% = {best['score']:.2f}). "
+                f"The secondary pick '{secondary_market}' is also a strong alternative with "
+                f"probability {secondary_prob*100:.1f}% and confidence {confidence*100:.1f}%. "
+                f"{historical_note}"
+            )
+            best['reason'] = f"{primary_reason} | {comparison}"
+        else:
+            best['reason'] = f"{primary_reason} | {historical_note}"
 
+        # Store prediction (same as before)
         db.predictions.update_one(
             {'match_id': str(match['_id']), 'market': market},
             {'$set': {
@@ -573,7 +611,6 @@ def best_bets():
         'bets': limited_bets,
         'available_markets': sorted(list(all_markets))
     })
-
 # ------------------------------------------------------------------
 # Recompute All (background)
 # ------------------------------------------------------------------
