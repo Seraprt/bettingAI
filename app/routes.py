@@ -224,7 +224,7 @@ def admin_approve(request_id):
     msg = approve_subscription(req['user_id'])
     return jsonify({'message': msg})
 
-@api.route('/admin/decline/<request_id>', methods=['POST'])
+@api.route('/admin/decline/<request_id>', methods=['POST'])   # <-- fixed: methods=['POST']
 @require_auth
 @require_admin
 def admin_decline(request_id):
@@ -432,6 +432,9 @@ def check_username():
     else:
         return jsonify({'available': True, 'suggestions': []})
 
+# ------------------------------------------------------------------
+# BEST BETS – with secondary picks
+# ------------------------------------------------------------------
 @api.route('/best_bets', methods=['GET'])
 @require_auth
 @require_premium
@@ -480,11 +483,59 @@ def best_bets():
         away = db.teams.find_one({'_id': match['away_team_id']})
         home_name = home['name'] if home else 'Unknown'
         away_name = away['name'] if away else 'Unknown'
-
         market = best['market']
-        all_markets.add(market)
 
-        # ----- STORE PREDICTION (like sure bets) -----
+        # ---- SECONDARY PICK (like sure bets) ----
+        h_xg = match.get('home_xg', 1.2)
+        a_xg = match.get('away_xg', 1.0)
+        probs = compute_all_market_probs(h_xg, a_xg)
+        confidence = best['confidence']
+
+        # List of candidate secondary markets (user-specified)
+        secondary_candidates = [
+            ('1X', '1X (Home or Draw)'),
+            ('X2', 'X2 (Draw or Away)'),
+            ('under_2.5', 'Under 2.5 Goals'),
+            ('under_3.5', 'Under 3.5 Goals'),
+            ('under_4.5', 'Under 4.5 Goals'),
+            ('under_1.5', 'Under 1.5 Goals'),
+            ('home_under_2.5', 'Home Under 2.5 Goals'),
+            ('away_under_2.5', 'Away Under 2.5 Goals'),
+            ('odd', 'Odd Total Goals'),
+            ('even', 'Even Total Goals'),
+            ('home_over_0.5', 'Home Over 0.5 Goals'),
+            ('away_over_0.5', 'Away Over 0.5 Goals')
+        ]
+
+        secondary_market = None
+        secondary_prob = None
+        secondary_score = 0
+        secondary_reason = ""
+
+        for mkt_key, mkt_label in secondary_candidates:
+            if mkt_key == market:
+                continue
+            prob_val = probs.get(mkt_key)
+            if prob_val is None:
+                continue
+            # Skip trivial markets that are almost always high
+            if mkt_key == 'over_0.5':
+                continue
+            if mkt_key == 'under_4.5':
+                continue
+            score = prob_val * confidence
+            if prob_val > 0.85:
+                score *= 0.5
+            if score > secondary_score:
+                secondary_score = score
+                secondary_market = mkt_key
+                secondary_prob = prob_val
+                secondary_reason = f"Secondary pick: {mkt_label} with probability {(prob_val*100):.1f}% and confidence {(confidence*100):.1f}%."
+
+        if secondary_market and secondary_prob is not None:
+            existing_reason = best['reason']
+            best['reason'] = f"{existing_reason} | {secondary_reason}"
+
         db.predictions.update_one(
             {'match_id': str(match['_id']), 'market': market},
             {'$set': {
@@ -512,7 +563,8 @@ def best_bets():
             'stake_kelly': best['stake_kelly'],
             'reason': best['reason'],
             'match_id': str(match['_id']),
-            'time_remaining': get_time_remaining(match['date'])
+            'time_remaining': get_time_remaining(match['date']),
+            'date': match['date'].isoformat()
         })
 
     best_bets.sort(key=lambda x: x['combined_score'], reverse=True)
@@ -521,6 +573,7 @@ def best_bets():
         'bets': limited_bets,
         'available_markets': sorted(list(all_markets))
     })
+
 # ------------------------------------------------------------------
 # Recompute All (background)
 # ------------------------------------------------------------------
@@ -559,7 +612,7 @@ def recompute_all():
     return jsonify({'message': 'Recompute started in background. Check logs for progress.'}), 202
 
 # ------------------------------------------------------------------
-# Sure Bets (with 89% confidence default)
+# Sure Bets – with date added
 # ------------------------------------------------------------------
 @api.route('/sure_bets', methods=['GET'])
 @require_auth
@@ -578,10 +631,10 @@ def sure_bets():
 
     sure_list = get_sure_bets(matches, min_prob, min_confidence)
 
-    # Store each bet for evaluation (as already in your code)
     for bet in sure_list:
         match = db.matches.find_one({'_id': ObjectId(bet['match_id'])})
         if match:
+            bet['date'] = match['date'].isoformat()
             db.predictions.update_one(
                 {'match_id': bet['match_id'], 'market': bet['market']},
                 {'$set': {
@@ -590,7 +643,7 @@ def sure_bets():
                     'probability': bet['probability'],
                     'confidence': bet['confidence'],
                     'predicted_at': datetime.utcnow(),
-                    'match_date': match['date'].isoformat(),
+                    'match_date': match['date'],
                     'actual_outcome': None,
                     'home_team': match['home_team_id'],
                     'away_team': match['away_team_id'],
@@ -599,7 +652,10 @@ def sure_bets():
                 upsert=True
             )
 
-    return jsonify(sure_list)# Market Page (groups: GG, 1X2, DC+Under, DC+GG, Draw) with 89% confidence
+    return jsonify(sure_list)
+
+# ------------------------------------------------------------------
+# Market Page (groups: GG, 1X2, DC+Under, DC+GG, Draw) with 89% confidence
 # ------------------------------------------------------------------
 @api.route('/market_bets', methods=['GET'])
 @require_auth
@@ -614,7 +670,6 @@ def market_bets():
     if not matches:
         return jsonify({'message': 'No upcoming matches found.'}), 200
 
-    # Ensure predictions exist
     for m in matches:
         if m.get('home_win_prob') is None:
             try:
@@ -622,12 +677,10 @@ def market_bets():
             except Exception as e:
                 logging.error(f"Prediction failed for {m['_id']}: {e}")
 
-    # Build a mapping of match_id -> match date (isoformat)
     match_dates = {str(m['_id']): m['date'].isoformat() for m in matches}
 
     groups = get_market_groups(matches, min_confidence)
 
-    # Add Draw group (already done inside, but we'll store)
     draw_group = {'name': 'Draw (Most Likely)', 'bets': []}
     for match in matches:
         if match.get('date') and match['date'] < now:
@@ -649,20 +702,17 @@ def market_bets():
             'confidence': confidence,
             'score': score,
             'match_id': str(match['_id']),
-            'date': match['date'].isoformat()   # <-- ADD DATE
+            'date': match['date'].isoformat()
         })
     draw_group['bets'] = sorted(draw_group['bets'], key=lambda x: x['score'], reverse=True)[:4]
     groups['draw'] = draw_group
 
-    # ---- Add date to all bets from get_market_groups ----
     for group_key, group in groups.items():
         for bet in group['bets']:
             bet['date'] = match_dates.get(bet['match_id'])
 
-    # ----- STORE ALL PREDICTIONS FROM ALL GROUPS (fix the storage bug) -----
     for group_key, group in groups.items():
         for bet in group['bets']:
-            # Fetch match date from the match_dates dict using match_id
             match_date_str = match_dates.get(bet['match_id'])
             if match_date_str:
                 match_date = datetime.fromisoformat(match_date_str)
@@ -686,7 +736,9 @@ def market_bets():
             )
 
     return jsonify(groups)
-# Prediction Accuracy Details (all predictions, grouped by market type)
+
+# ------------------------------------------------------------------
+# Prediction Accuracy Details – with match date already included
 # ------------------------------------------------------------------
 @api.route('/prediction_accuracy_details', methods=['GET'])
 @require_auth
@@ -774,7 +826,6 @@ def factors_predictions():
     if not matches:
         return jsonify({'message': 'No upcoming matches found.'}), 200
 
-    # Ensure predictions exist
     for m in matches:
         if m.get('home_win_prob') is None:
             try:
@@ -1088,7 +1139,7 @@ def prediction_accuracy():
         'pending': pending
     })
 
-@api.route('/admin/learning_insights', methods=['GET'])
+@api.route('/admin/learning_insights', methods=['GET'])   # <-- fixed: methods=['GET']
 @require_auth
 @require_admin
 def learning_insights():
